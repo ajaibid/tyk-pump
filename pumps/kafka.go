@@ -148,11 +148,8 @@ func (k *KafkaPump) WriteData(ctx context.Context, data []interface{}) error {
 			"response_code":   decoded.ResponseCode,
 			"alias":           decoded.Alias,
 			"api_key":         decoded.APIKey,
-			"api_version":     decoded.APIVersion,
 			"api_name":        decoded.APIName,
 			"api_id":          decoded.APIID,
-			"org_id":          decoded.OrgID,
-			"oauth_id":        decoded.OauthID,
 			"raw_request":     decoded.RawRequest,
 			"request_time_ms": decoded.RequestTime,
 			"raw_response":    decoded.RawResponse,
@@ -160,6 +157,7 @@ func (k *KafkaPump) WriteData(ctx context.Context, data []interface{}) error {
 			"host":            decoded.Host,
 			"content_length":  decoded.ContentLength,
 			"user_agent":      decoded.UserAgent,
+			"tags":            decoded.Tags,
 		}
 		//Add static metadata to json
 		for key, value := range k.kafkaConf.MetaData {
