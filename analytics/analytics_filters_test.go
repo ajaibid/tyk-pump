@@ -7,6 +7,7 @@ func TestShouldFilter(t *testing.T) {
 		APIID:        "apiid123",
 		OrgID:        "orgid123",
 		ResponseCode: 200,
+		Path:         "/stock/healthcheck/login",
 	}
 
 	//test skip_api_ids
@@ -90,6 +91,15 @@ func TestShouldFilter(t *testing.T) {
 		t.Fatal("filter should be filtering the record")
 	}
 
+	//test skip path regex
+	filter = AnalyticsFilters{
+		SkipPathContainsRegex: "login",
+	}
+	shouldFilter = filter.ShouldFilter(record)
+	if shouldFilter == false {
+		t.Fatal("filter should be filtering the record")
+	}
+
 	//test no filter
 	filter = AnalyticsFilters{}
 	shouldFilter = filter.ShouldFilter(record)
@@ -109,6 +119,14 @@ func TestHasFilter(t *testing.T) {
 
 	filter = AnalyticsFilters{
 		APIIDs: []string{"api123"},
+	}
+	hasFilter = filter.HasFilter()
+	if hasFilter == false {
+		t.Fatal("HasFilter should be true.")
+	}
+
+	filter = AnalyticsFilters{
+		SkipPathContainsRegex: "login",
 	}
 	hasFilter = filter.HasFilter()
 	if hasFilter == false {

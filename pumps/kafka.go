@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/TykTechnologies/logrus"
@@ -150,15 +152,31 @@ func (k *KafkaPump) WriteData(ctx context.Context, data []interface{}) error {
 			"api_key":         decoded.APIKey,
 			"api_name":        decoded.APIName,
 			"api_id":          decoded.APIID,
-			"raw_request":     decoded.RawRequest,
 			"request_time_ms": decoded.RequestTime,
-			"raw_response":    decoded.RawResponse,
 			"ip_address":      decoded.IPAddress,
 			"host":            decoded.Host,
 			"content_length":  decoded.ContentLength,
 			"user_agent":      decoded.UserAgent,
-			"tags":            decoded.Tags,
 		}
+
+		if val, ok := k.kafkaConf.MetaData["detailed_log_for_status"]; ok {
+			if strings.Contains(val, strconv.Itoa(decoded.ResponseCode)) {
+				message["raw_response"] = decoded.RawResponse
+				message["raw_request"] = decoded.RawRequest
+			}
+		}
+
+		if val, ok := k.kafkaConf.MetaData["include_tag"]; ok {
+			prefixes := strings.Split(val, ",")
+			for _, prefix := range prefixes {
+				for _, tagContent := range decoded.Tags {
+					if strings.HasPrefix(tagContent, prefix) {
+						message[prefix] = strings.TrimPrefix(tagContent, prefix)[1:]
+					}
+				}
+			}
+		}
+
 		//Add static metadata to json
 		for key, value := range k.kafkaConf.MetaData {
 			message[key] = value
@@ -181,7 +199,7 @@ func (k *KafkaPump) WriteData(ctx context.Context, data []interface{}) error {
 	if kafkaError != nil {
 		k.log.WithError(kafkaError).Error("unable to write message")
 	}
-	k.log.Debug("ElapsedTime in seconds for ", len(data), " records:", time.Now().Sub(startTime))
+	k.log.Info("ElapsedTime in ms for ", len(data), " records:", time.Since(startTime).Milliseconds())
 	return nil
 }
 
