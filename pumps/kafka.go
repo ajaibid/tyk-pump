@@ -3,6 +3,7 @@ package pumps
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"strconv"
 	"strings"
@@ -161,8 +162,22 @@ func (k *KafkaPump) WriteData(ctx context.Context, data []interface{}) error {
 
 		if val, ok := k.kafkaConf.MetaData["detailed_log_for_status"]; ok {
 			if strings.Contains(val, strconv.Itoa(decoded.ResponseCode)) {
+				filteredRequest := decoded.RawRequest
+				if hideHeader, ok2 := k.kafkaConf.MetaData["hide_request_header"]; ok2 {
+					rawRequest, _ := base64.StdEncoding.DecodeString(decoded.RawRequest)
+					hideHeaderArr := strings.Split(hideHeader, ",")
+
+					hideBody, _ := k.kafkaConf.MetaData["hide_request_body_key"]
+					hideBodyArr := strings.Split(hideBody, ",")
+
+					rawDecodedData, _ := decodeRawData(string(rawRequest), hideHeaderArr, hideBodyArr, false)
+					filteredRequestByte, _ := json.Marshal(rawDecodedData)
+					filteredRequest = string(filteredRequestByte)
+
+				}
+
+				message["raw_request"] = filteredRequest
 				message["raw_response"] = decoded.RawResponse
-				message["raw_request"] = decoded.RawRequest
 			}
 		}
 

@@ -15,6 +15,7 @@ import (
 	"math"
 	"math/rand"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -35,8 +36,8 @@ type MoesifPump struct {
 }
 
 type rawDecoded struct {
-	headers map[string]interface{}
-	body    interface{}
+	Headers map[string]interface{} `json:"headers"`
+	Body    interface{}            `json:"body"`
 }
 
 var moesifPrefix = "moesif-pump"
@@ -156,13 +157,13 @@ func maskData(data map[string]interface{}, maskBody []string) map[string]interfa
 		switch val.(type) {
 		case map[string]interface{}:
 			if contains(maskBody, key) {
-				data[key] = "*****"
+				data[key] = "**"
 			} else {
 				maskData(val.(map[string]interface{}), maskBody)
 			}
 		default:
 			if contains(maskBody, key) {
-				data[key] = "*****"
+				data[key] = "**"
 			}
 		}
 	}
@@ -179,10 +180,15 @@ func maskRawBody(rawBody string, maskBody []string) string {
 		}
 
 		out, _ := json.Marshal(maskedBody)
-		return base64.StdEncoding.EncodeToString([]byte(out))
+		return string(out)
+	} else {
+		for _, mask := range maskBody {
+			regexBody := regexp.MustCompile(`(` + mask + `)=(.*?)(&|$)`)
+			rawBody = string(regexBody.ReplaceAll([]byte(rawBody), []byte("$1=**")))
+		}
 	}
 
-	return base64.StdEncoding.EncodeToString([]byte(rawBody))
+	return rawBody
 }
 
 func buildURI(raw string, defaultPath string) string {
@@ -271,8 +277,8 @@ func (p *MoesifPump) WriteData(ctx context.Context, data []interface{}) error {
 			Verb:             record.Method,
 			ApiVersion:       &record.APIVersion,
 			IpAddress:        &record.IPAddress,
-			Headers:          decodedReqBody.headers,
-			Body:             &decodedReqBody.body,
+			Headers:          decodedReqBody.Headers,
+			Body:             &decodedReqBody.Body,
 			TransferEncoding: &transferEncoding,
 		}
 
@@ -300,8 +306,8 @@ func (p *MoesifPump) WriteData(ctx context.Context, data []interface{}) error {
 			Time:             &rspTime,
 			Status:           record.ResponseCode,
 			IpAddress:        nil,
-			Headers:          decodedRspBody.headers,
-			Body:             decodedRspBody.body,
+			Headers:          decodedRspBody.Headers,
+			Body:             decodedRspBody.Body,
 			TransferEncoding: &transferEncoding,
 		}
 
@@ -319,7 +325,7 @@ func (p *MoesifPump) WriteData(ctx context.Context, data []interface{}) error {
 		// User Id
 		var userID string
 		if p.moesifConf.UserIDHeader != "" {
-			userID = fetchIDFromHeader(decodedReqBody.headers, decodedRspBody.headers, p.moesifConf.UserIDHeader)
+			userID = fetchIDFromHeader(decodedReqBody.Headers, decodedRspBody.Headers, p.moesifConf.UserIDHeader)
 		}
 
 		if userID == "" {
@@ -333,7 +339,7 @@ func (p *MoesifPump) WriteData(ctx context.Context, data []interface{}) error {
 		// Company Id
 		var companyID string
 		if p.moesifConf.CompanyIDHeader != "" {
-			companyID = fetchIDFromHeader(decodedReqBody.headers, decodedRspBody.headers, p.moesifConf.CompanyIDHeader)
+			companyID = fetchIDFromHeader(decodedReqBody.Headers, decodedRspBody.Headers, p.moesifConf.CompanyIDHeader)
 		}
 
 		// Generate random percentage
@@ -411,8 +417,8 @@ func decodeRawData(raw string, maskHeaders []string, maskBody []string, disableC
 	}
 
 	ret := &rawDecoded{
-		headers: headers,
-		body:    body,
+		Headers: headers,
+		Body:    body,
 	}
 
 	return ret, nil
