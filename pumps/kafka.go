@@ -211,20 +211,21 @@ func (k *KafkaPump) WriteData(ctx context.Context, data []interface{}) error {
 		// Filter only expose raw request response for certain status
 		if val, ok := k.kafkaConf.MetaData["detailed_log_for_status"]; ok {
                 if strings.Contains(val, strconv.Itoa(decoded.ResponseCode)) {
-                    filteredRequest := base64.StdEncoding.DecodeString(decoded.RawRequest)
+                    filteredRequestB, _ := base64.StdEncoding.DecodeString(decoded.RawRequest)
+                    filteredRequest := string(filteredRequestB)
                     if hideHeader, ok2 := k.kafkaConf.MetaData["hide_request_header"]; ok2 {
                         hideHeaderArr := strings.Split(hideHeader, ",")
 
                         hideBody, _ := k.kafkaConf.MetaData["hide_request_body_key"]
                         hideBodyArr := strings.Split(hideBody, ",")
 
-                        rawDecodedData, _ := decodeRawData(string(filteredRequest), hideHeaderArr, hideBodyArr, false)
+                        rawDecodedData, _ := decodeRawData(filteredRequest, hideHeaderArr, hideBodyArr, false)
                         filteredRequestByte, _ := json.Marshal(rawDecodedData)
                         filteredRequest = string(filteredRequestByte)
-
                     }
 
-                    rawResponseDecoded, _ := base64.StdEncoding.DecodeString(decoded.RawResponse)
+                    rawResponseDecodedB, _ := base64.StdEncoding.DecodeString(decoded.RawResponse)
+                    rawResponseDecoded := string(rawResponseDecodedB)
                     message["raw_request"] = filteredRequest
                     message["raw_response"] = rawResponseDecoded
                 }

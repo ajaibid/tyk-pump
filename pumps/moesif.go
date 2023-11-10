@@ -409,7 +409,7 @@ func (p *MoesifPump) WriteData(ctx context.Context, data []interface{}) error {
 				userID = record.Alias
 			} else if record.OauthID != "" {
 				userID = record.OauthID
-			} else if len(decodedReqBody.headers) != 0 {
+			} else if len(decodedReqBody.Headers) != 0 {
 				var authHeaderName string
 				if p.moesifConf.AuthorizationHeaderName != "" {
 					authHeaderName = strings.ToLower(p.moesifConf.AuthorizationHeaderName)
@@ -424,7 +424,7 @@ func (p *MoesifPump) WriteData(ctx context.Context, data []interface{}) error {
 					authUserIdField = "sub"
 				}
 
-				if auth_header, found := decodedReqBody.headers[authHeaderName]; found {
+				if auth_header, found := decodedReqBody.Headers[authHeaderName]; found {
 					if token, ok := auth_header.(string); ok {
 						if strings.Contains(token, "Basic") {
 							basicToken := fetchTokenPayload(token, "Basic")
