@@ -16,6 +16,7 @@ func init() {
 	AvailablePumps["csv"] = &CSVPump{}
 	AvailablePumps["elasticsearch"] = &ElasticsearchPump{}
 	AvailablePumps["influx"] = &InfluxPump{}
+	AvailablePumps["influx2"] = &Influx2Pump{}
 	AvailablePumps["moesif"] = &MoesifPump{}
 	AvailablePumps["statsd"] = &StatsdPump{}
 	AvailablePumps["segment"] = &SegmentPump{}
@@ -27,4 +28,12 @@ func init() {
 	AvailablePumps["dogstatsd"] = &DogStatsdPump{}
 	AvailablePumps["kafka"] = &KafkaPump{}
 	AvailablePumps["syslog"] = &SyslogPump{}
+	AvailablePumps["sql"] = &SQLPump{}
+	AvailablePumps["sql_aggregate"] = &SQLAggregatePump{}
+	AvailablePumps["stdout"] = &StdOutPump{}
+	AvailablePumps["timestream"] = &TimestreamPump{}
+	AvailablePumps["mongo-graph"] = &GraphMongoPump{}
+	AvailablePumps["sql-graph"] = &GraphSQLPump{}
+	AvailablePumps["sql-graph-aggregate"] = &GraphSQLAggregatePump{}
+	AvailablePumps["resurfaceio"] = &ResurfacePump{}
 }

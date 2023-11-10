@@ -1,112 +1,115 @@
 package analytics
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
 
 func TestShouldFilter(t *testing.T) {
 	record := AnalyticsRecord{
 		APIID:        "apiid123",
 		OrgID:        "orgid123",
 		ResponseCode: 200,
-		Path:         "/stock/healthcheck/login",
+        Path:         "/stock/healthcheck/login",
 	}
 
-	//test skip_api_ids
-	filter := AnalyticsFilters{
-		SkippedAPIIDs: []string{"apiid123"},
-	}
-	shouldFilter := filter.ShouldFilter(record)
-	if shouldFilter == false {
-		t.Fatal("filter should be filtering the record")
-	}
-
-	//test skip_org_ids
-	filter = AnalyticsFilters{
-		SkippedOrgsIDs: []string{"orgid123"},
-	}
-	shouldFilter = filter.ShouldFilter(record)
-	if shouldFilter == false {
-		t.Fatal("filter should be filtering the record")
-	}
-
-	//test skip_response_codes
-	filter = AnalyticsFilters{
-		SkippedResponseCodes: []int{200},
-	}
-	shouldFilter = filter.ShouldFilter(record)
-	if shouldFilter == false {
-		t.Fatal("filter should be filtering the record")
-	}
-
-	//test api_ids
-	filter = AnalyticsFilters{
-		APIIDs: []string{"apiid123"},
-	}
-	shouldFilter = filter.ShouldFilter(record)
-	if shouldFilter == true {
-		t.Fatal("filter should not be filtering the record")
-	}
-
-	//test org_ids
-	filter = AnalyticsFilters{
-		OrgsIDs: []string{"orgid123"},
-	}
-	shouldFilter = filter.ShouldFilter(record)
-	if shouldFilter == true {
-		t.Fatal("filter should not be filtering the record")
-	}
-
-	//test response_codes
-	filter = AnalyticsFilters{
-		ResponseCodes: []int{200},
-	}
-	shouldFilter = filter.ShouldFilter(record)
-	if shouldFilter == true {
-		t.Fatal("filter should not be filtering the record")
-	}
-
-	//test different org_ids
-	filter = AnalyticsFilters{
-		OrgsIDs: []string{"orgid321"},
-	}
-	shouldFilter = filter.ShouldFilter(record)
-	if shouldFilter == false {
-		t.Fatal("filter should be filtering the record")
-	}
-
-	//test different api_ids
-	filter = AnalyticsFilters{
-		APIIDs: []string{"apiid231"},
-	}
-	shouldFilter = filter.ShouldFilter(record)
-	if shouldFilter == false {
-		t.Fatal("filter should be filtering the record")
-	}
-
-	//test different response_codes
-	filter = AnalyticsFilters{
-		ResponseCodes: []int{201},
-	}
-	shouldFilter = filter.ShouldFilter(record)
-	if shouldFilter == false {
-		t.Fatal("filter should be filtering the record")
-	}
-
-	//test skip path regex
-	filter = AnalyticsFilters{
-		SkipPathContainsRegex: "login",
-	}
-	shouldFilter = filter.ShouldFilter(record)
-	if shouldFilter == false {
-		t.Fatal("filter should be filtering the record")
-	}
-
-	//test no filter
-	filter = AnalyticsFilters{}
-	shouldFilter = filter.ShouldFilter(record)
-	if shouldFilter == true {
-		t.Fatal("filter should not be filtering the record")
+	tcs := []struct {
+		testName          string
+		filter            AnalyticsFilters
+		expectedFiltering bool
+	}{
+		{
+			testName: "skip_apiids",
+			filter: AnalyticsFilters{
+				SkippedAPIIDs: []string{"apiid123"},
+			},
+			expectedFiltering: true,
+		},
+		{
+			testName: "skip_org_ids",
+			filter: AnalyticsFilters{
+				SkippedOrgsIDs: []string{"orgid123"},
+			},
+			expectedFiltering: true,
+		},
+		{
+			testName: "skip_response_codes",
+			filter: AnalyticsFilters{
+				SkippedResponseCodes: []int{200},
+			},
+			expectedFiltering: true,
+		},
+		{
+			testName: "api_ids",
+			filter: AnalyticsFilters{
+				APIIDs: []string{"apiid123"},
+			},
+			expectedFiltering: false,
+		},
+		{
+			testName: "org_ids",
+			filter: AnalyticsFilters{
+				OrgsIDs: []string{"orgid123"},
+			},
+			expectedFiltering: false,
+		},
+		{
+			testName: "response_codes",
+			filter: AnalyticsFilters{
+				ResponseCodes: []int{200},
+			},
+			expectedFiltering: false,
+		},
+		{
+			testName: "different org_ids",
+			filter: AnalyticsFilters{
+				OrgsIDs: []string{"orgid321"},
+			},
+			expectedFiltering: true,
+		},
+		{
+			testName: "different api_ids",
+			filter: AnalyticsFilters{
+				APIIDs: []string{"apiid231"},
+			},
+			expectedFiltering: true,
+		},
+		{
+			testName: "different response_codes",
+			filter: AnalyticsFilters{
+				ResponseCodes: []int{201},
+			},
+			expectedFiltering: true,
+		},
+		{
+			testName:          "no filter",
+			filter:            AnalyticsFilters{},
+			expectedFiltering: false,
+		},
+		{
+			testName: "skip path in regex",
+			filter: AnalyticsFilters{
+				SkipPathContainsRegex: []string{"login"},
+			},
+			expectedFiltering: true,
+		},
+		{
+			testName: "multiple filter",
+			filter: AnalyticsFilters{
+				ResponseCodes: []int{200},
+				APIIDs:        []string{"apiid123"},
+			},
+			expectedFiltering: false,
+		},
 	}
 
+	for _, tc := range tcs {
+		t.Run(tc.testName, func(t *testing.T) {
+			shouldFilter := tc.filter.ShouldFilter(record)
+			assert.Equal(t, tc.expectedFiltering, shouldFilter)
+		})
+	}
 }
 
 func TestHasFilter(t *testing.T) {
@@ -125,12 +128,11 @@ func TestHasFilter(t *testing.T) {
 		t.Fatal("HasFilter should be true.")
 	}
 
-	filter = AnalyticsFilters{
-		SkipPathContainsRegex: "login",
-	}
-	hasFilter = filter.HasFilter()
-	if hasFilter == false {
-		t.Fatal("HasFilter should be true.")
-	}
-
+    filter = AnalyticsFilters{
+        SkipPathContainsRegex: "login",
+    }
+    hasFilter = filter.HasFilter()
+    if hasFilter == false {
+        t.Fatal("HasFilter should be true.")
+    }
 }

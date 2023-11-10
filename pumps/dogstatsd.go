@@ -10,7 +10,6 @@ import (
 	"github.com/mitchellh/mapstructure"
 	"github.com/pkg/errors"
 
-	"github.com/TykTechnologies/logrus"
 	"github.com/TykTechnologies/tyk-pump/analytics"
 )
 
@@ -21,21 +20,83 @@ const (
 	defaultDogstatsdUDSWriteTimeoutSeconds = 1
 )
 
+var dogstatPrefix = "dogstatsd"
+var dogstatDefaultENV = PUMPS_ENV_PREFIX + "_DOGSTATSD" + PUMPS_ENV_META_PREFIX
+
 type DogStatsdPump struct {
 	conf   *DogStatsdConf
 	client *statsd.Client
-	log    *logrus.Entry
 	CommonPumpConfig
 }
 
+// @PumpConf DogStatsd
 type DogStatsdConf struct {
-	Namespace            string  `mapstructure:"namespace"`
-	Address              string  `mapstructure:"address"`
-	SampleRate           float64 `mapstructure:"sample_rate"`
-	AsyncUDS             bool    `mapstructure:"async_uds"`
-	AsyncUDSWriteTimeout int     `mapstructure:"async_uds_write_timeout_seconds"`
-	Buffered             bool    `mapstructure:"buffered"`
-	BufferedMaxMessages  int     `mapstructure:"buffered_max_messages"`
+	EnvPrefix string `mapstructure:"meta_env_prefix"`
+	// Prefix for your metrics to datadog.
+	Namespace string `json:"namespace" mapstructure:"namespace"`
+	// Address of the datadog agent including host & port.
+	Address string `json:"address" mapstructure:"address"`
+	// Defaults to `1` which equates to `100%` of requests. To sample at `50%`, set to `0.5`.
+	SampleRate float64 `json:"sample_rate" mapstructure:"sample_rate"`
+	// Enable async UDS over UDP https://github.com/Datadog/datadog-go#unix-domain-sockets-client.
+	AsyncUDS bool `json:"async_uds" mapstructure:"async_uds"`
+	// Integer write timeout in seconds if `async_uds: true`.
+	AsyncUDSWriteTimeout int `json:"async_uds_write_timeout_seconds" mapstructure:"async_uds_write_timeout_seconds"`
+	// Enable buffering of messages.
+	Buffered bool `json:"buffered" mapstructure:"buffered"`
+	// Max messages in single datagram if `buffered: true`. Default 16.
+	BufferedMaxMessages int `json:"buffered_max_messages" mapstructure:"buffered_max_messages"`
+	// List of tags to be added to the metric. The possible options are listed in the below example.
+	//
+	// If no tag is specified the fallback behavior is to use the below tags:
+	// - `path`
+	// - `method`
+	// - `response_code`
+	// - `api_version`
+	// - `api_name`
+	// - `api_id`
+	// - `org_id`
+	// - `tracked`
+	// - `oauth_id`
+	//
+	// Note that this configuration can generate significant charges due to the unbound nature of
+	// the `path` tag.
+	//
+	// ```{.json}
+	// "dogstatsd": {
+	//   "type": "dogstatsd",
+	//   "meta": {
+	//     "address": "localhost:8125",
+	//     "namespace": "pump",
+	//     "async_uds": true,
+	//     "async_uds_write_timeout_seconds": 2,
+	//     "buffered": true,
+	//     "buffered_max_messages": 32,
+	//     "sample_rate": 0.5,
+	//     "tags": [
+	//       "method",
+	//       "response_code",
+	//       "api_version",
+	//       "api_name",
+	//       "api_id",
+	//       "org_id",
+	//       "tracked",
+	//       "path",
+	//       "oauth_id"
+	//     ]
+	//   }
+	// },
+	// ```
+	//
+	// On startup, you should see the loaded configs when initializing the dogstatsd pump
+	// ```
+	// [May 10 15:23:44]  INFO dogstatsd: initializing pump
+	// [May 10 15:23:44]  INFO dogstatsd: namespace: pump.
+	// [May 10 15:23:44]  INFO dogstatsd: sample_rate: 50%
+	// [May 10 15:23:44]  INFO dogstatsd: buffered: true, max_messages: 32
+	// [May 10 15:23:44]  INFO dogstatsd: async_uds: true, write_timeout: 2s
+	// ```
+	Tags []string `json:"tags" mapstructure:"tags"`
 }
 
 func (s *DogStatsdPump) New() Pump {
@@ -47,13 +108,19 @@ func (s *DogStatsdPump) GetName() string {
 	return "DogStatsd Pump"
 }
 
-func (s *DogStatsdPump) Init(conf interface{}) error {
-	s.log = log.WithField("prefix", "dogstatsd")
+func (s *DogStatsdPump) GetEnvPrefix() string {
+	return s.conf.EnvPrefix
+}
 
-	s.log.Info("initializing pump")
+func (s *DogStatsdPump) Init(conf interface{}) error {
+
+	s.log = log.WithField("prefix", dogstatPrefix)
+
 	if err := mapstructure.Decode(conf, &s.conf); err != nil {
 		return errors.Wrap(err, "unable to decode dogstatsd configuration")
 	}
+
+	processPumpEnvVars(s, s.log, s.conf, dogstatDefaultENV)
 
 	if s.conf.Namespace == "" {
 		s.conf.Namespace = defaultDogstatsdNamespace
@@ -78,18 +145,21 @@ func (s *DogStatsdPump) Init(conf interface{}) error {
 
 	var opts []statsd.Option
 	if s.conf.Buffered {
-		opts = append(opts, statsd.Buffered())
 		opts = append(opts, statsd.WithMaxMessagesPerPayload(s.conf.BufferedMaxMessages))
+	} else {
+		//this option is added to simulate an unbuffered behaviour. Specified in datadog 3.0.0 lib release https://github.com/DataDog/datadog-go/blob/master/CHANGELOG.md#breaking-changes-1
+		opts = append(opts, statsd.WithMaxMessagesPerPayload(1))
 	}
 
 	if s.conf.AsyncUDS {
-		opts = append(opts, statsd.WithAsyncUDS())
 		opts = append(opts, statsd.WithWriteTimeoutUDS(time.Duration(s.conf.AsyncUDSWriteTimeout)*time.Second))
 	}
 
 	if err := s.connect(opts); err != nil {
 		return errors.Wrap(err, "unable to connect to dogstatsd client")
 	}
+
+	s.log.Info(s.GetName() + " Initialized")
 
 	return nil
 }
@@ -113,11 +183,10 @@ func (s *DogStatsdPump) WriteData(ctx context.Context, data []interface{}) error
 		return nil
 	}
 
-	s.log.Info(fmt.Sprintf("purging %d records", len(data)))
+	s.log.Debug("Attempting to write ", len(data), " records...")
 	for _, v := range data {
 		// Convert to AnalyticsRecord
 		decoded := v.(analytics.AnalyticsRecord)
-		decoded.Path = strings.TrimRight(decoded.Path, "/")
 
 		/*
 		 * From DataDog website:
@@ -126,25 +195,67 @@ func (s *DogStatsdPump) WriteData(ctx context.Context, data []interface{}) error
 		 *
 		 * As such, we have significantly limited the available metrics which gets sent to datadog.
 		 */
-		tags := []string{
-			"path:" + decoded.Path,                                // request path
-			"method:" + decoded.Method,                            // request method
-			fmt.Sprintf("response_code:%d", decoded.ResponseCode), // http response code
-			"api_version:" + decoded.APIVersion,
-			"api_name:" + decoded.APIName,
-			"api_id:" + decoded.APIID,
-			"org_id:" + decoded.OrgID,
-			fmt.Sprintf("tracked:%t", decoded.TrackPath),
-		}
-
-		if decoded.OauthID != "" {
-			tags = append(tags, "oauth_id:"+decoded.OauthID)
+		var tags []string
+		if len(s.conf.Tags) == 0 {
+			tags = []string{
+				"path:" + decoded.Path,                                // request path
+				"method:" + decoded.Method,                            // request method
+				fmt.Sprintf("response_code:%d", decoded.ResponseCode), // http response code
+				"api_version:" + decoded.APIVersion,
+				"api_name:" + decoded.APIName,
+				"api_id:" + decoded.APIID,
+				"org_id:" + decoded.OrgID,
+				fmt.Sprintf("tracked:%t", decoded.TrackPath),
+			}
+			if decoded.OauthID != "" {
+				tags = append(tags, "oauth_id:"+decoded.OauthID)
+			}
+		} else {
+			tags = make([]string, 0, len(s.conf.Tags))
+			for _, tag := range s.conf.Tags {
+				var value string
+				switch tag {
+				case "method":
+					value = "method:" + decoded.Method // request method
+				case "response_code":
+					value = fmt.Sprintf("response_code:%d", decoded.ResponseCode) // http response code
+				case "api_version":
+					value = "api_version:" + decoded.APIVersion
+				case "api_name":
+					value = "api_name:" + decoded.APIName
+				case "api_id":
+					value = "api_id:" + decoded.APIID
+				case "org_id":
+					value = "org_id:" + decoded.OrgID
+				case "tracked":
+					value = fmt.Sprintf("tracked:%t", decoded.TrackPath)
+				case "path":
+					decoded.Path = strings.TrimRight(decoded.Path, "/")
+					value = "path:" + decoded.Path // request path
+				case "oauth_id":
+					if decoded.OauthID == "" {
+						continue
+					}
+					value = "oauth_id:" + decoded.OauthID
+				default:
+					return fmt.Errorf("undefined tag '%s'", tag)
+				}
+				tags = append(tags, value)
+			}
 		}
 
 		if err := s.client.Histogram("request_time", float64(decoded.RequestTime), tags, s.conf.SampleRate); err != nil {
 			s.log.WithError(err).Error("unable to record Histogram, dropping analytics record")
 		}
 	}
+	s.log.Info("Purged ", len(data), " records...")
 
+	return nil
+}
+
+func (s *DogStatsdPump) Shutdown() error {
+	if s.conf.Buffered {
+		return s.client.Flush()
+	}
 	return nil
 }

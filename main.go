@@ -2,25 +2,24 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"fmt"
+	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
-	"os"
-
-	"github.com/gocraft/health"
-
-	msgpack "gopkg.in/vmihailenco/msgpack.v2"
-
-	"github.com/TykTechnologies/logrus"
-	prefixed "github.com/TykTechnologies/logrus-prefixed-formatter"
 	"github.com/TykTechnologies/tyk-pump/analytics"
 	"github.com/TykTechnologies/tyk-pump/analytics/demo"
 	logger "github.com/TykTechnologies/tyk-pump/logger"
 	"github.com/TykTechnologies/tyk-pump/pumps"
+	"github.com/TykTechnologies/tyk-pump/serializer"
 	"github.com/TykTechnologies/tyk-pump/server"
 	"github.com/TykTechnologies/tyk-pump/storage"
-
+	"github.com/gocraft/health"
+	"github.com/sirupsen/logrus"
 	kingpin "gopkg.in/alecthomas/kingpin.v2"
 )
 
@@ -28,7 +27,8 @@ var SystemConfig TykPumpConfiguration
 var AnalyticsStore storage.AnalyticsStorage
 var UptimeStorage storage.AnalyticsStorage
 var Pumps []pumps.Pump
-var UptimePump pumps.MongoPump
+var UptimePump pumps.UptimePump
+var AnalyticsSerializers []serializer.AnalyticsSerializer
 
 var log = logger.GetLogger()
 
@@ -40,15 +40,23 @@ var (
 	demoMode           = kingpin.Flag("demo", "pass orgID string to generate demo data").Default("").String()
 	demoApiMode        = kingpin.Flag("demo-api", "pass apiID string to generate demo data").Default("").String()
 	demoApiVersionMode = kingpin.Flag("demo-api-version", "pass apiID string to generate demo data").Default("").String()
+	demoTrackPath      = kingpin.Flag("demo-track-path", "enable track path in analytics records").Default("false").Bool()
+	demoDays           = kingpin.Flag("demo-days", "flag that determines the number of days for the analytics records").Default("30").Int()
+	demoRecordsPerHour = kingpin.Flag("demo-records-per-hour", "flag that determines the number of records per hour for the analytics records").Default("0").Int()
+	demoFutureData     = kingpin.Flag("demo-future-data", "flag that determines if the demo data should be in the future").Default("false").Bool()
 	debugMode          = kingpin.Flag("debug", "enable debug mode").Bool()
-	version            = kingpin.Version(VERSION)
+	version            = kingpin.Version(pumps.VERSION)
 )
 
 func Init() {
 	SystemConfig = TykPumpConfiguration{}
 
 	kingpin.Parse()
-	log.Formatter = new(prefixed.TextFormatter)
+	LoadConfig(conf, &SystemConfig)
+
+	if SystemConfig.LogFormat == "json" {
+		log.Formatter = &logrus.JSONFormatter{}
+	}
 
 	envDemo := os.Getenv("TYK_PMP_BUILDDEMODATA")
 	if envDemo != "" {
@@ -56,11 +64,12 @@ func Init() {
 		demoMode = &envDemo
 	}
 
+	//Serializer init
+	AnalyticsSerializers = []serializer.AnalyticsSerializer{serializer.NewAnalyticsSerializer(serializer.MSGP_SERIALIZER), serializer.NewAnalyticsSerializer(serializer.PROTOBUF_SERIALIZER)}
+
 	log.WithFields(logrus.Fields{
 		"prefix": mainPrefix,
-	}).Info("## Tyk Analytics Pump, ", VERSION, " ##")
-
-	LoadConfig(conf, &SystemConfig)
+	}).Info("## Tyk Pump, ", pumps.VERSION, " ##")
 
 	// If no environment variable is set, check the configuration file:
 	if os.Getenv("TYK_LOGLEVEL") == "" {
@@ -114,12 +123,12 @@ func storeVersion() {
 	versionStore.KeyPrefix = "version-check-"
 	versionStore.Config = versionConf
 	versionStore.Connect()
-	versionStore.SetKey("pump", VERSION, 0)
+	versionStore.SetKey("pump", pumps.VERSION, 0)
 }
 
 func initialisePumps() {
-	Pumps = make([]pumps.Pump, len(SystemConfig.Pumps))
-	i := 0
+	Pumps = []pumps.Pump{}
+
 	for key, pmp := range SystemConfig.Pumps {
 		pumpTypeName := pmp.Type
 		if pumpTypeName == "" {
@@ -133,78 +142,143 @@ func initialisePumps() {
 			}).Error("Pump load error (skipping): ", err)
 		} else {
 			thisPmp := pmpType.New()
+			thisPmp.SetFilters(pmp.Filters)
+			thisPmp.SetTimeout(pmp.Timeout)
+			thisPmp.SetOmitDetailedRecording(pmp.OmitDetailedRecording)
+			thisPmp.SetMaxRecordSize(pmp.MaxRecordSize)
+			thisPmp.SetIgnoreFields(pmp.IgnoreFields)
+			thisPmp.SetDecodingRequest(pmp.DecodeRawRequest)
+			thisPmp.SetDecodingResponse(pmp.DecodeRawResponse)
 			initErr := thisPmp.Init(pmp.Meta)
 			if initErr != nil {
-				log.Error("Pump init error (skipping): ", initErr)
+				log.WithField("pump", thisPmp.GetName()).Error("Pump init error (skipping): ", initErr)
 			} else {
 				log.WithFields(logrus.Fields{
 					"prefix": mainPrefix,
-				}).Info("Init Pump: ", thisPmp.GetName())
-				thisPmp.SetFilters(pmp.Filters)
-				thisPmp.SetTimeout(pmp.Timeout)
-				thisPmp.SetOmitDetailedRecording(pmp.OmitDetailedRecording)
-				Pumps[i] = thisPmp
+				}).Info("Init Pump: ", key)
+				Pumps = append(Pumps, thisPmp)
 			}
 		}
-		i++
+	}
+
+	if len(Pumps) == 0 {
+		log.WithFields(logrus.Fields{
+			"prefix": mainPrefix,
+		}).Fatal("No pumps configured")
 	}
 
 	if !SystemConfig.DontPurgeUptimeData {
-		log.WithFields(logrus.Fields{
-			"prefix": mainPrefix,
-		}).Info("'dont_purge_uptime_data' set to false, attempting to start Uptime pump! ", UptimePump.GetName())
-		UptimePump = pumps.MongoPump{}
-		UptimePump.Init(SystemConfig.UptimePumpConfig)
-		log.WithFields(logrus.Fields{
-			"prefix": mainPrefix,
-		}).Info("Init Uptime Pump: ", UptimePump.GetName())
+		initialiseUptimePump()
 	}
 
 }
 
-func StartPurgeLoop(secInterval int, omitDetails bool) {
+func initialiseUptimePump() {
+	log.WithFields(logrus.Fields{
+		"prefix": mainPrefix,
+	}).Info("'dont_purge_uptime_data' set to false, attempting to start Uptime pump! ")
+
+	switch SystemConfig.UptimePumpConfig.UptimeType {
+	case "sql":
+		UptimePump = &pumps.SQLPump{IsUptime: true}
+		UptimePump.Init(SystemConfig.UptimePumpConfig.SQLConf)
+
+	default:
+		UptimePump = &pumps.MongoPump{IsUptime: true}
+		UptimePump.Init(SystemConfig.UptimePumpConfig.MongoConf)
+	}
+
+	log.WithFields(logrus.Fields{
+		"prefix": mainPrefix,
+		"type":   SystemConfig.UptimePumpConfig.Type,
+	}).Info("Init Uptime Pump: ", UptimePump.GetName())
+}
+
+func StartPurgeLoop(wg *sync.WaitGroup, ctx context.Context, secInterval int, chunkSize int64, expire time.Duration, omitDetails bool) {
 	for range time.Tick(time.Duration(secInterval) * time.Second) {
+
 		job := instrument.NewJob("PumpRecordsPurge")
+		startTime := time.Now()
 
-		AnalyticsValues := AnalyticsStore.GetAndDeleteSet(storage.ANALYTICS_KEYNAME)
-		if len(AnalyticsValues) > 0 {
-			startTime := time.Now()
+		for i := -1; i < 10; i++ {
+			var analyticsKeyName string
+			if i == -1 {
+				//if it's the first iteration, we look for tyk-system-analytics to maintain backwards compatibility or if analytics_config.enable_multiple_analytics_keys is disabled in the gateway
+				analyticsKeyName = storage.ANALYTICS_KEYNAME
+			} else {
+				analyticsKeyName = fmt.Sprintf("%v_%v", storage.ANALYTICS_KEYNAME, i)
+			}
 
-			// Convert to something clean
-			keys := make([]interface{}, len(AnalyticsValues))
-
-			for i, v := range AnalyticsValues {
-				decoded := analytics.AnalyticsRecord{}
-				err := msgpack.Unmarshal([]byte(v.(string)), &decoded)
-				log.WithFields(logrus.Fields{
-					"prefix": mainPrefix,
-				}).Debug("Decoded Record: ", decoded)
-				if err != nil {
-					log.WithFields(logrus.Fields{
-						"prefix": mainPrefix,
-					}).Error("Couldn't unmarshal analytics data:", err)
-				} else {
-					if omitDetails {
-						decoded.RawRequest = ""
-						decoded.RawResponse = ""
-					}
-					keys[i] = interface{}(decoded)
-					job.Event("record")
+			for _, serializerMethod := range AnalyticsSerializers {
+				analyticsKeyName += serializerMethod.GetSuffix()
+				AnalyticsValues := AnalyticsStore.GetAndDeleteSet(analyticsKeyName, chunkSize, expire)
+				if len(AnalyticsValues) > 0 {
+					PreprocessAnalyticsValues(AnalyticsValues, serializerMethod, analyticsKeyName, omitDetails, job, startTime, secInterval)
 				}
 			}
 
-			// Send to pumps
-			writeToPumps(keys, job, startTime, secInterval)
-
-			job.Timing("purge_time_all", time.Since(startTime).Nanoseconds())
-
 		}
+
+		job.Timing("purge_time_all", time.Since(startTime).Nanoseconds())
 
 		if !SystemConfig.DontPurgeUptimeData {
-			UptimeValues := UptimeStorage.GetAndDeleteSet(storage.UptimeAnalytics_KEYNAME)
+			UptimeValues := UptimeStorage.GetAndDeleteSet(storage.UptimeAnalytics_KEYNAME, chunkSize, expire)
 			UptimePump.WriteUptimeData(UptimeValues)
 		}
+
+		if checkShutdown(ctx, wg) {
+			return
+		}
 	}
+}
+
+func PreprocessAnalyticsValues(AnalyticsValues []interface{}, serializerMethod serializer.AnalyticsSerializer, analyticsKeyName string, omitDetails bool, job *health.Job, startTime time.Time, secInterval int) {
+	keys := make([]interface{}, len(AnalyticsValues))
+
+	for i, v := range AnalyticsValues {
+		decoded := analytics.AnalyticsRecord{}
+		err := serializerMethod.Decode([]byte(v.(string)), &decoded)
+
+		log.WithFields(logrus.Fields{
+			"prefix": mainPrefix,
+		}).Debug("Decoded Record: ", decoded)
+		if err != nil {
+			log.WithFields(logrus.Fields{
+				"prefix":       mainPrefix,
+				"analytic_key": analyticsKeyName,
+			}).Error("Couldn't unmarshal analytics data:", err)
+			continue
+		}
+		keys[i] = interface{}(decoded)
+		job.Event("record")
+	}
+	// Send to pumps
+	writeToPumps(keys, job, startTime, int(secInterval))
+}
+
+func checkShutdown(ctx context.Context, wg *sync.WaitGroup) bool {
+	shutdown := false
+	select {
+	case <-ctx.Done():
+		log.WithFields(logrus.Fields{
+			"prefix": mainPrefix,
+		}).Info("Shutting down ", len(Pumps), " pumps...")
+		for _, pmp := range Pumps {
+			if err := pmp.Shutdown(); err != nil {
+				log.WithFields(logrus.Fields{
+					"prefix": mainPrefix,
+				}).Error("Error trying to gracefully shutdown  "+pmp.GetName()+":", err)
+			} else {
+				log.WithFields(logrus.Fields{
+					"prefix": mainPrefix,
+				}).Info(pmp.GetName() + " gracefully stopped.")
+			}
+		}
+		wg.Done()
+		shutdown = true
+	default:
+	}
+	return shutdown
 }
 
 func writeToPumps(keys []interface{}, job *health.Job, startTime time.Time, purgeDelay int) {
@@ -224,21 +298,54 @@ func writeToPumps(keys []interface{}, job *health.Job, startTime time.Time, purg
 }
 
 func filterData(pump pumps.Pump, keys []interface{}) []interface{} {
+
+	shouldTrim := SystemConfig.MaxRecordSize != 0 || pump.GetMaxRecordSize() != 0
 	filters := pump.GetFilters()
-	if !filters.HasFilter() && !pump.GetOmitDetailedRecording() {
+	ignoreFields := pump.GetIgnoreFields()
+	getDecodingResponse := pump.GetDecodedResponse()
+	getDecodingRequest := pump.GetDecodedRequest()
+	// Checking to see if all the config options are empty/false
+	if !getDecodingRequest && !getDecodingResponse && !filters.HasFilter() && !pump.GetOmitDetailedRecording() && !shouldTrim && len(ignoreFields) == 0 {
 		return keys
 	}
-	filteredKeys := keys[:]
+
+	filteredKeys := make([]interface{}, len(keys))
+	copy(filteredKeys, keys)
+
 	newLenght := 0
 
-	for _, key := range filteredKeys {
+	for _, key := range keys {
 		decoded := key.(analytics.AnalyticsRecord)
 		if pump.GetOmitDetailedRecording() {
 			decoded.RawRequest = ""
 			decoded.RawResponse = ""
+		} else {
+			if shouldTrim {
+				if pump.GetMaxRecordSize() != 0 {
+					decoded.TrimRawData(pump.GetMaxRecordSize())
+				} else {
+					decoded.TrimRawData(SystemConfig.MaxRecordSize)
+				}
+			}
 		}
 		if filters.ShouldFilter(decoded) {
 			continue
+		}
+		if len(ignoreFields) > 0 {
+			decoded.RemoveIgnoredFields(ignoreFields)
+		}
+		// DECODING RAW REQUEST AND RESPONSE FROM BASE 64
+		if getDecodingRequest {
+			rawRequest, err := base64.StdEncoding.DecodeString(decoded.RawRequest)
+			if err == nil {
+				decoded.RawRequest = string(rawRequest)
+			}
+		}
+		if getDecodingResponse {
+			rawResponse, err := base64.StdEncoding.DecodeString(decoded.RawResponse)
+			if err == nil {
+				decoded.RawResponse = string(rawResponse)
+			}
 		}
 		filteredKeys[newLenght] = decoded
 		newLenght++
@@ -282,7 +389,6 @@ func execPumpWriting(wg *sync.WaitGroup, pmp pumps.Pump, keys *[]interface{}, pu
 
 	go func(ch chan error, ctx context.Context, pmp pumps.Pump, keys *[]interface{}) {
 		filteredKeys := filterData(pmp, *keys)
-
 		ch <- pmp.WriteData(ctx, filteredKeys)
 	}(ch, ctx, pmp, keys)
 
@@ -313,7 +419,7 @@ func execPumpWriting(wg *sync.WaitGroup, pmp pumps.Pump, keys *[]interface{}, pu
 func main() {
 	Init()
 	SetupInstrumentation()
-	go server.ServeHealthCheck(SystemConfig.HealthCheckEndpointName, SystemConfig.HealthCheckEndpointPort)
+	go server.ServeHealthCheck(SystemConfig.HealthCheckEndpointName, SystemConfig.HealthCheckEndpointPort, SystemConfig.HTTPProfile)
 
 	// Store version which will be read by dashboard and sent to
 	// vclu(version check and licecnse utilisation) service
@@ -324,19 +430,38 @@ func main() {
 
 	// prime the pumps
 	initialisePumps()
-
 	if *demoMode != "" {
-		log.Warning("BUILDING DEMO DATA AND EXITING...")
+		log.Info("BUILDING DEMO DATA AND EXITING...")
 		log.Warning("Starting from date: ", time.Now().AddDate(0, 0, -30))
 		demo.DemoInit(*demoMode, *demoApiMode, *demoApiVersionMode)
-		demo.GenerateDemoData(time.Now().AddDate(0, 0, -30), 30, *demoMode, writeToPumps)
-
+		demo.GenerateDemoData(*demoDays, *demoRecordsPerHour, *demoMode, *demoFutureData, *demoTrackPath, writeToPumps)
 		return
 	}
+
+	if SystemConfig.PurgeChunk > 0 {
+		log.WithField("PurgeChunk", SystemConfig.PurgeChunk).Info("PurgeChunk enabled")
+		if SystemConfig.StorageExpirationTime == 0 {
+			SystemConfig.StorageExpirationTime = 60
+			log.WithField("StorageExpirationTime", 60).Warn("StorageExpirationTime not set, but PurgeChunk enabled, overriding to 60s")
+		}
+	}
+
 	// start the worker loop
 	log.WithFields(logrus.Fields{
 		"prefix": mainPrefix,
-	}).Info("Starting purge loop @", SystemConfig.PurgeDelay, "(s)")
+	}).Infof("Starting purge loop @%d, chunk size %d", SystemConfig.PurgeDelay, SystemConfig.PurgeChunk)
 
-	StartPurgeLoop(SystemConfig.PurgeDelay, SystemConfig.OmitDetailedRecording)
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	ctx, cancel := context.WithCancel(context.Background())
+	go StartPurgeLoop(&wg, ctx, SystemConfig.PurgeDelay, SystemConfig.PurgeChunk, time.Duration(SystemConfig.StorageExpirationTime)*time.Second, SystemConfig.OmitDetailedRecording)
+
+	termChan := make(chan os.Signal, 1)
+	signal.Notify(termChan, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
+	<-termChan // Blocks here until either SIGINT or SIGTERM is received.
+	cancel()   // cancel the context
+	wg.Wait()  // wait till all the pumps finish
+	log.WithFields(logrus.Fields{
+		"prefix": mainPrefix,
+	}).Info("Tyk-pump stopped.")
 }

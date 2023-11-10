@@ -3,19 +3,20 @@ package pumps
 import (
 	"context"
 	"crypto/tls"
-	"encoding/base64"
 	"encoding/json"
+	"encoding/base64"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/TykTechnologies/logrus"
 	"github.com/TykTechnologies/tyk-pump/analytics"
 	"github.com/mitchellh/mapstructure"
 	"github.com/segmentio/kafka-go"
 	"github.com/segmentio/kafka-go/sasl"
 	"github.com/segmentio/kafka-go/sasl/plain"
 	"github.com/segmentio/kafka-go/sasl/scram"
+	"github.com/sirupsen/logrus"
 
 	"github.com/segmentio/kafka-go/snappy"
 )
@@ -30,22 +31,43 @@ type KafkaPump struct {
 type Json map[string]interface{}
 
 var kafkaPrefix = "kafka-pump"
+var kafkaDefaultENV = PUMPS_ENV_PREFIX + "_KAFKA" + PUMPS_ENV_META_PREFIX
 
+// @PumpConf Kafka
 type KafkaConf struct {
-	Broker                []string          `mapstructure:"broker"`
-	ClientId              string            `mapstructure:"client_id"`
-	Topic                 string            `mapstructure:"topic"`
-	Timeout               time.Duration     `mapstructure:"timeout"`
-	Compressed            bool              `mapstructure:"compressed"`
-	MetaData              map[string]string `mapstructure:"meta_data"`
-	UseSSL                bool              `mapstructure:"use_ssl"`
-	SSLInsecureSkipVerify bool              `mapstructure:"ssl_insecure_skip_verify"`
-	SSLCertFile           string            `mapstructure:"ssl_cert_file"`
-	SSLKeyFile            string            `mapstructure:"ssl_key_file"`
-	SASLMechanism         string            `mapstructure:"sasl_mechanism"`
-	Username              string            `mapstructure:"sasl_username"`
-	Password              string            `mapstructure:"sasl_password"`
-	Algorithm             string            `mapstructure:"sasl_algorithm"`
+	EnvPrefix string `mapstructure:"meta_env_prefix"`
+	// The list of brokers used to discover the partitions available on the kafka cluster. E.g.
+	// "localhost:9092".
+	Broker []string `json:"broker" mapstructure:"broker"`
+	// Unique identifier for client connections established with Kafka.
+	ClientId string `json:"client_id" mapstructure:"client_id"`
+	// The topic that the writer will produce messages to.
+	Topic string `json:"topic" mapstructure:"topic"`
+	// Timeout is the maximum amount of seconds to wait for a connect or write to complete.
+	Timeout interface{} `json:"timeout" mapstructure:"timeout"`
+	// Enable "github.com/golang/snappy" codec to be used to compress Kafka messages. By default
+	// is `false`.
+	Compressed bool `json:"compressed" mapstructure:"compressed"`
+	// Can be used to set custom metadata inside the kafka message.
+	MetaData map[string]string `json:"meta_data" mapstructure:"meta_data"`
+	// Enables SSL connection.
+	UseSSL bool `json:"use_ssl" mapstructure:"use_ssl"`
+	// Controls whether the pump client verifies the kafka server's certificate chain and host
+	// name.
+	SSLInsecureSkipVerify bool `json:"ssl_insecure_skip_verify" mapstructure:"ssl_insecure_skip_verify"`
+	// Can be used to set custom certificate file for authentication with kafka.
+	SSLCertFile string `json:"ssl_cert_file" mapstructure:"ssl_cert_file"`
+	// Can be used to set custom key file for authentication with kafka.
+	SSLKeyFile string `json:"ssl_key_file" mapstructure:"ssl_key_file"`
+	// SASL mechanism configuration. Only "plain" and "scram" are supported.
+	SASLMechanism string `json:"sasl_mechanism" mapstructure:"sasl_mechanism"`
+	// SASL username.
+	Username string `json:"sasl_username" mapstructure:"sasl_username"`
+	// SASL password.
+	Password string `json:"sasl_password" mapstructure:"sasl_password"`
+	// SASL algorithm. It's the algorithm specified for scram mechanism. It could be sha-512 or sha-256.
+	// Defaults to "sha-256".
+	Algorithm string `json:"sasl_algorithm" mapstructure:"sasl_algorithm"`
 }
 
 func (k *KafkaPump) New() Pump {
@@ -57,15 +79,24 @@ func (k *KafkaPump) GetName() string {
 	return "Kafka Pump"
 }
 
+func (k *KafkaPump) GetEnvPrefix() string {
+	return k.kafkaConf.EnvPrefix
+}
+
 func (k *KafkaPump) Init(config interface{}) error {
 	k.log = log.WithField("prefix", kafkaPrefix)
 
 	//Read configuration file
 	k.kafkaConf = &KafkaConf{}
 	err := mapstructure.Decode(config, &k.kafkaConf)
-
 	if err != nil {
 		k.log.Fatal("Failed to decode configuration: ", err)
+	}
+
+	processPumpEnvVars(k, k.log, k.kafkaConf, kafkaDefaultENV)
+	// This interface field is not reached by envconfig library, that's why we manually check it
+	if os.Getenv("TYK_PMP_PUMPS_KAFKA_META_TIMEOUT") != "" {
+		k.kafkaConf.Timeout = os.Getenv("TYK_PMP_PUMPS_KAFKA_META_TIMEOUT")
 	}
 
 	var tlsConfig *tls.Config
@@ -114,9 +145,26 @@ func (k *KafkaPump) Init(config interface{}) error {
 		k.log.WithField("SASL-Mechanism", k.kafkaConf.SASLMechanism).Warn("Tyk pump doesn't support this SASL mechanism.")
 	}
 
+	// Timeout is an interface type to allow both time.Duration and float values
+	var timeout time.Duration
+	switch v := k.kafkaConf.Timeout.(type) {
+	case string:
+		timeout, err = time.ParseDuration(v) // i.e: when timeout is '1s'
+		if err != nil {
+			floatValue, floatErr := strconv.ParseFloat(v, 64) // i.e: when timeout is '1'
+			if floatErr != nil {
+				k.log.Fatal("Failed to parse timeout: ", floatErr)
+			} else {
+				timeout = time.Duration(floatValue * float64(time.Second))
+			}
+		}
+	case float64:
+		timeout = time.Duration(v) * time.Second // i.e: when timeout is 1
+	}
+
 	//Kafka writer connection config
 	dialer := &kafka.Dialer{
-		Timeout:       k.kafkaConf.Timeout * time.Second,
+		Timeout:       timeout,
 		ClientID:      k.kafkaConf.ClientId,
 		TLS:           tlsConfig,
 		SASLMechanism: mechanism,
@@ -126,19 +174,20 @@ func (k *KafkaPump) Init(config interface{}) error {
 	k.writerConfig.Topic = k.kafkaConf.Topic
 	k.writerConfig.Balancer = &kafka.LeastBytes{}
 	k.writerConfig.Dialer = dialer
-	k.writerConfig.WriteTimeout = k.kafkaConf.Timeout * time.Second
-	k.writerConfig.ReadTimeout = k.kafkaConf.Timeout * time.Second
+	k.writerConfig.WriteTimeout = timeout
+	k.writerConfig.ReadTimeout = timeout
 	if k.kafkaConf.Compressed {
 		k.writerConfig.CompressionCodec = snappy.NewCompressionCodec()
 	}
 
-	k.log.Info("Kafka config: ", k.writerConfig)
+	k.log.Info(k.GetName() + " Initialized")
+
 	return nil
 }
 
 func (k *KafkaPump) WriteData(ctx context.Context, data []interface{}) error {
 	startTime := time.Now()
-	k.log.Info("Writing ", len(data), " records...")
+	k.log.Debug("Attempting to write ", len(data), " records...")
 	kafkaMessages := make([]kafka.Message, len(data))
 	for i, v := range data {
 		//Build message format
@@ -159,38 +208,38 @@ func (k *KafkaPump) WriteData(ctx context.Context, data []interface{}) error {
 			"content_length":  decoded.ContentLength,
 			"user_agent":      decoded.UserAgent,
 		}
-
+		// Filter only expose raw request response for certain status
 		if val, ok := k.kafkaConf.MetaData["detailed_log_for_status"]; ok {
-			if strings.Contains(val, strconv.Itoa(decoded.ResponseCode)) {
-				filteredRequest := decoded.RawRequest
-				if hideHeader, ok2 := k.kafkaConf.MetaData["hide_request_header"]; ok2 {
-					rawRequest, _ := base64.StdEncoding.DecodeString(decoded.RawRequest)
-					hideHeaderArr := strings.Split(hideHeader, ",")
+                if strings.Contains(val, strconv.Itoa(decoded.ResponseCode)) {
+                    filteredRequest := base64.StdEncoding.DecodeString(decoded.RawRequest)
+                    if hideHeader, ok2 := k.kafkaConf.MetaData["hide_request_header"]; ok2 {
+                        hideHeaderArr := strings.Split(hideHeader, ",")
 
-					hideBody, _ := k.kafkaConf.MetaData["hide_request_body_key"]
-					hideBodyArr := strings.Split(hideBody, ",")
+                        hideBody, _ := k.kafkaConf.MetaData["hide_request_body_key"]
+                        hideBodyArr := strings.Split(hideBody, ",")
 
-					rawDecodedData, _ := decodeRawData(string(rawRequest), hideHeaderArr, hideBodyArr, false)
-					filteredRequestByte, _ := json.Marshal(rawDecodedData)
-					filteredRequest = string(filteredRequestByte)
+                        rawDecodedData, _ := decodeRawData(string(filteredRequest), hideHeaderArr, hideBodyArr, false)
+                        filteredRequestByte, _ := json.Marshal(rawDecodedData)
+                        filteredRequest = string(filteredRequestByte)
 
-				}
+                    }
 
-				message["raw_request"] = filteredRequest
-				message["raw_response"] = decoded.RawResponse
-			}
-		}
+                    rawResponseDecoded, _ := base64.StdEncoding.DecodeString(decoded.RawResponse)
+                    message["raw_request"] = filteredRequest
+                    message["raw_response"] = rawResponseDecoded
+                }
+            }
 
-		if val, ok := k.kafkaConf.MetaData["include_tag"]; ok {
-			prefixes := strings.Split(val, ",")
-			for _, prefix := range prefixes {
-				for _, tagContent := range decoded.Tags {
-					if strings.HasPrefix(tagContent, prefix) {
-						message[prefix] = strings.TrimPrefix(tagContent, prefix)[1:]
-					}
-				}
-			}
-		}
+            if val, ok := k.kafkaConf.MetaData["include_tag"]; ok {
+                prefixes := strings.Split(val, ",")
+                for _, prefix := range prefixes {
+                    for _, tagContent := range decoded.Tags {
+                        if strings.HasPrefix(tagContent, prefix) {
+                            message[prefix] = strings.TrimPrefix(tagContent, prefix)[1:]
+                        }
+                    }
+                }
+            }
 
 		//Add static metadata to json
 		for key, value := range k.kafkaConf.MetaData {
