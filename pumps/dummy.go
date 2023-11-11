@@ -2,8 +2,6 @@ package pumps
 
 import (
 	"context"
-
-	"github.com/TykTechnologies/logrus"
 )
 
 type DummyPump struct {
@@ -11,6 +9,7 @@ type DummyPump struct {
 }
 
 var dummyPrefix = "dummy-pump"
+var dummyDefaultENV = PUMPS_ENV_PREFIX + "_DUMMY" + PUMPS_ENV_META_PREFIX
 
 func (p *DummyPump) New() Pump {
 	newPump := DummyPump{}
@@ -22,15 +21,13 @@ func (p *DummyPump) GetName() string {
 }
 
 func (p *DummyPump) Init(conf interface{}) error {
-	log.WithFields(logrus.Fields{
-		"prefix": dummyPrefix,
-	}).Debug("Dummy Initialized")
+	p.log = log.WithField("prefix", dummyPrefix)
+
+	p.log.Info("Dummy Initialized")
 	return nil
 }
 
 func (p *DummyPump) WriteData(ctx context.Context, data []interface{}) error {
-	log.WithFields(logrus.Fields{
-		"prefix": dummyPrefix,
-	}).Info("Writing ", len(data), " records")
+	p.log.Info("Writing ", len(data), " records")
 	return nil
 }

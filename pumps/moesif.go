@@ -6,11 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"github.com/TykTechnologies/logrus"
-	"github.com/TykTechnologies/tyk-pump/analytics"
-	"github.com/mitchellh/mapstructure"
-	"github.com/moesif/moesifapi-go"
-	"github.com/moesif/moesifapi-go/models"
 	"io/ioutil"
 	"math"
 	"math/rand"
@@ -19,6 +14,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/TykTechnologies/tyk-pump/analytics"
+	"github.com/mitchellh/mapstructure"
+	"github.com/moesif/moesifapi-go"
+	"github.com/moesif/moesifapi-go/models"
+	"github.com/sirupsen/logrus"
 )
 
 type MoesifPump struct {
@@ -41,17 +42,51 @@ type rawDecoded struct {
 }
 
 var moesifPrefix = "moesif-pump"
+var moesifDefaultENV = PUMPS_ENV_PREFIX + "_MOESIF" + PUMPS_ENV_META_PREFIX
 
+// @PumpConf Moesif
 type MoesifConf struct {
-	ApplicationID              string   `mapstructure:"application_id"`
-	RequestHeaderMasks         []string `mapstructure:"request_header_masks"`
-	ResponseHeaderMasks        []string `mapstructure:"response_header_masks"`
-	RequestBodyMasks           []string `mapstructure:"request_body_masks"`
-	ResponseBodyMasks          []string `mapstructure:"response_body_masks"`
-	DisableCaptureRequestBody  bool     `mapstructure:"disable_capture_request_body"`
-	DisableCaptureResponseBody bool     `mapstructure:"disable_capture_response_body"`
-	UserIDHeader               string   `mapstructure:"user_id_header"`
-	CompanyIDHeader            string   `mapstructure:"company_id_header"`
+	EnvPrefix string `mapstructure:"meta_env_prefix"`
+	// Moesif Application Id. You can find your Moesif Application Id from
+	// [_Moesif Dashboard_](https://www.moesif.com/) -> _Top Right Menu_ -> _API Keys_ . Moesif
+	// recommends creating separate Application Ids for each environment such as Production,
+	// Staging, and Development to keep data isolated.
+	ApplicationID string `json:"application_id" mapstructure:"application_id"`
+	// An option to mask a specific request header field.
+	RequestHeaderMasks []string `json:"request_header_masks" mapstructure:"request_header_masks"`
+	// An option to mask a specific response header field.
+	ResponseHeaderMasks []string `json:"response_header_masks" mapstructure:"response_header_masks"`
+	// An option to mask a specific - request body field.
+	RequestBodyMasks []string `json:"request_body_masks" mapstructure:"request_body_masks"`
+	// An option to mask a specific response body field.
+	ResponseBodyMasks []string `json:"response_body_masks" mapstructure:"response_body_masks"`
+	// An option to disable logging of request body. Default value is `false`.
+	DisableCaptureRequestBody bool `json:"disable_capture_request_body" mapstructure:"disable_capture_request_body"`
+	// An option to disable logging of response body. Default value is `false`.
+	DisableCaptureResponseBody bool `json:"disable_capture_response_body" mapstructure:"disable_capture_response_body"`
+	// An optional field name to identify User from a request or response header.
+	UserIDHeader string `json:"user_id_header" mapstructure:"user_id_header"`
+	// An optional field name to identify Company (Account) from a request or response header.
+	CompanyIDHeader string `json:"company_id_header" mapstructure:"company_id_header"`
+	// Set this to `true` to enable `bulk_config`.
+	EnableBulk bool `json:"enable_bulk" mapstructure:"enable_bulk"`
+	// Batch writing trigger configuration.
+	//   * `"event_queue_size"` - (optional) An optional field name which specify the maximum
+	// number of events to hold in queue before sending to Moesif. In case of network issues when
+	// not able to connect/send event to Moesif, skips adding new events to the queue to prevent
+	// memory overflow. Type: int. Default value is `10000`.
+	//   * `"batch_size"` - (optional) An optional field name which specify the maximum batch size
+	// when sending to Moesif. Type: int. Default value is `200`.
+	//   * `"timer_wake_up_seconds"` - (optional) An optional field which specifies a time (every n
+	// seconds) how often background thread runs to send events to moesif. Type: int. Default value
+	// is `2` seconds.
+	BulkConfig map[string]interface{} `json:"bulk_config" mapstructure:"bulk_config"`
+	// An optional request header field name to used to identify the User in Moesif. Default value
+	// is `authorization`.
+	AuthorizationHeaderName string `json:"authorization_header_name" mapstructure:"authorization_header_name"`
+	// An optional field name use to parse the User from authorization header in Moesif. Default
+	// value is `sub`.
+	AuthorizationUserIdField string `json:"authorization_user_id_field" mapstructure:"authorization_user_id_field"`
 }
 
 func (p *MoesifPump) New() Pump {
@@ -61,6 +96,10 @@ func (p *MoesifPump) New() Pump {
 
 func (p *MoesifPump) GetName() string {
 	return "Moesif Pump"
+}
+
+func (p *MoesifPump) GetEnvPrefix() string {
+	return p.moesifConf.EnvPrefix
 }
 
 func (p *MoesifPump) parseConfiguration(response *http.Response) (int, string, time.Time) {
@@ -126,10 +165,10 @@ func (p *MoesifPump) getSamplingPercentage(userID string, companyID string) int 
 
 func fetchIDFromHeader(requestHeaders map[string]interface{}, responseHeaders map[string]interface{}, headerName string) string {
 	var id string
-	if requid, ok := requestHeaders[headerName].(string); ok {
+	if requid, ok := requestHeaders[strings.ToLower(headerName)].(string); ok {
 		id = requid
 	}
-	if resuid, ok := responseHeaders[headerName].(string); ok {
+	if resuid, ok := responseHeaders[strings.ToLower(headerName)].(string); ok {
 		id = resuid
 	}
 	return id
@@ -180,15 +219,15 @@ func maskRawBody(rawBody string, maskBody []string) string {
 		}
 
 		out, _ := json.Marshal(maskedBody)
-		return string(out)
+		return base64.StdEncoding.EncodeToString([]byte(out))
 	} else {
-		for _, mask := range maskBody {
-			regexBody := regexp.MustCompile(`(` + mask + `)=(.*?)(&|$)`)
-			rawBody = string(regexBody.ReplaceAll([]byte(rawBody), []byte("$1=**")))
-		}
-	}
+        for _, mask := range maskBody {
+            regexBody := regexp.MustCompile(`(` + mask + `)=(.*?)(&|$)`)
+            rawBody = string(regexBody.ReplaceAll([]byte(rawBody), []byte("$1=**")))
+        }
+        return rawBody
+    }
 
-	return rawBody
 }
 
 func buildURI(raw string, defaultPath string) string {
@@ -205,17 +244,65 @@ func buildURI(raw string, defaultPath string) string {
 	return defaultPath
 }
 
+func fetchTokenPayload(token string, tokenType string) string {
+	return strings.TrimSpace(strings.SplitAfter(token, tokenType)[1])
+}
+
+func parseAuthorizationHeader(token string, field string) string {
+	if token != "" {
+		data, err := base64.RawURLEncoding.DecodeString(token)
+		if err == nil {
+			parsedJSON := map[string]interface{}{}
+			if jsonErr := json.Unmarshal([]byte(data), &parsedJSON); jsonErr == nil {
+				if value, ok := parsedJSON[field]; ok {
+					return value.(string)
+				}
+			}
+		}
+	}
+	return ""
+}
+
 func (p *MoesifPump) Init(config interface{}) error {
 	p.moesifConf = &MoesifConf{}
-	loadConfigErr := mapstructure.Decode(config, &p.moesifConf)
+	p.log = log.WithField("prefix", moesifPrefix)
 
+	loadConfigErr := mapstructure.Decode(config, &p.moesifConf)
 	if loadConfigErr != nil {
-		log.WithFields(logrus.Fields{
-			"prefix": moesifPrefix,
-		}).Fatal("Failed to decode configuration: ", loadConfigErr)
+		p.log.Fatal("Failed to decode configuration: ", loadConfigErr)
 	}
 
-	api := moesifapi.NewAPI(p.moesifConf.ApplicationID)
+	processPumpEnvVars(p, p.log, p.moesifConf, moesifDefaultENV)
+
+	var apiEndpoint string
+	var batchSize int
+	var eventQueueSize int
+	var timerWakeupSeconds int
+
+	if p.moesifConf.EnableBulk && len(p.moesifConf.BulkConfig) != 0 {
+
+		// Try to fetch the api endpoint from the bulk config
+		if endpoint, found := p.moesifConf.BulkConfig["api_endpoint"].(string); found {
+			apiEndpoint = endpoint
+		}
+
+		// Try to fetch the event queue size from the bulk config
+		if queueSize, found := p.moesifConf.BulkConfig["event_queue_size"]; found {
+			eventQueueSize = int(queueSize.(float64))
+		}
+
+		// Try to fetch the batch size from the bulk config
+		if batch, found := p.moesifConf.BulkConfig["batch_size"]; found {
+			batchSize = int(batch.(float64))
+		}
+
+		// Try to fetch the timer wake up seconds from the bulk config
+		if timer, found := p.moesifConf.BulkConfig["timer_wake_up_seconds"]; found {
+			timerWakeupSeconds = int(timer.(float64))
+		}
+	}
+
+	api := moesifapi.NewAPI(p.moesifConf.ApplicationID, &apiEndpoint, eventQueueSize, batchSize, timerWakeupSeconds)
 	p.moesifAPI = api
 
 	// Default samplingPercentage and DateTime
@@ -228,18 +315,15 @@ func (p *MoesifPump) Init(config interface{}) error {
 	if err == nil {
 		p.samplingPercentage, p.eTag, p.lastUpdatedTime = p.parseConfiguration(response)
 	} else {
-		log.WithFields(logrus.Fields{
-			"prefix": moesifPrefix,
-		}).Debug("Error fetching application configuration on initilization with err -  " + err.Error())
+		p.log.Debug("Error fetching application configuration on initilization with err -  " + err.Error())
 	}
 
+	p.log.Info(p.GetName() + " Initialized")
 	return nil
 }
 
 func (p *MoesifPump) WriteData(ctx context.Context, data []interface{}) error {
-	log.WithFields(logrus.Fields{
-		"prefix": moesifPrefix,
-	}).Info("Writing ", len(data), " records")
+	p.log.Debug("Attempting to write ", len(data), " records...")
 
 	if len(data) == 0 {
 		return nil
@@ -251,18 +335,14 @@ func (p *MoesifPump) WriteData(ctx context.Context, data []interface{}) error {
 
 		rawReq, err := base64.StdEncoding.DecodeString(record.RawRequest)
 		if err != nil {
-			log.WithFields(logrus.Fields{
-				"prefix": moesifPrefix,
-			}).Fatal(err)
+			p.log.Fatal(err)
 		}
 
 		decodedReqBody, err := decodeRawData(string(rawReq), p.moesifConf.RequestHeaderMasks,
 			p.moesifConf.RequestBodyMasks, p.moesifConf.DisableCaptureRequestBody)
 
 		if err != nil {
-			log.WithFields(logrus.Fields{
-				"prefix": moesifPrefix,
-			}).Fatal(err)
+			p.log.Fatal(err)
 		}
 
 		// Request URL
@@ -285,18 +365,14 @@ func (p *MoesifPump) WriteData(ctx context.Context, data []interface{}) error {
 		rawRsp, err := base64.StdEncoding.DecodeString(record.RawResponse)
 
 		if err != nil {
-			log.WithFields(logrus.Fields{
-				"prefix": moesifPrefix,
-			}).Fatal(err)
+			p.log.Fatal(err)
 		}
 
 		decodedRspBody, err := decodeRawData(string(rawRsp), p.moesifConf.ResponseHeaderMasks,
 			p.moesifConf.ResponseBodyMasks, p.moesifConf.DisableCaptureResponseBody)
 
 		if err != nil {
-			log.WithFields(logrus.Fields{
-				"prefix": moesifPrefix,
-			}).Fatal(err)
+			p.log.Fatal(err)
 		}
 
 		// Response Time
@@ -333,6 +409,45 @@ func (p *MoesifPump) WriteData(ctx context.Context, data []interface{}) error {
 				userID = record.Alias
 			} else if record.OauthID != "" {
 				userID = record.OauthID
+			} else if len(decodedReqBody.Headers) != 0 {
+				var authHeaderName string
+				if p.moesifConf.AuthorizationHeaderName != "" {
+					authHeaderName = strings.ToLower(p.moesifConf.AuthorizationHeaderName)
+				} else {
+					authHeaderName = "authorization"
+				}
+
+				var authUserIdField string
+				if p.moesifConf.AuthorizationUserIdField != "" {
+					authUserIdField = strings.ToLower(p.moesifConf.AuthorizationUserIdField)
+				} else {
+					authUserIdField = "sub"
+				}
+
+				if auth_header, found := decodedReqBody.Headers[authHeaderName]; found {
+					if token, ok := auth_header.(string); ok {
+						if strings.Contains(token, "Basic") {
+							basicToken := fetchTokenPayload(token, "Basic")
+							data, err := base64.StdEncoding.DecodeString(basicToken)
+							if err == nil {
+								userID = strings.Split(string(data), ":")[0]
+							}
+						} else if strings.Contains(token, "Bearer") {
+							bearerToken := fetchTokenPayload(token, "Bearer")
+							splitToken := strings.Split(bearerToken, ".")
+							if len(splitToken) >= 2 {
+								userID = parseAuthorizationHeader(splitToken[1], authUserIdField)
+							}
+						} else {
+							splitToken := strings.Split(token, ".")
+							if len(splitToken) >= 2 {
+								userID = parseAuthorizationHeader(splitToken[1], authUserIdField)
+							} else {
+								userID = parseAuthorizationHeader(token, authUserIdField)
+							}
+						}
+					}
+				}
 			}
 		}
 
@@ -350,9 +465,7 @@ func (p *MoesifPump) WriteData(ctx context.Context, data []interface{}) error {
 		p.samplingPercentage = p.getSamplingPercentage(userID, companyID)
 
 		if p.samplingPercentage < randomPercentage {
-			log.WithFields(logrus.Fields{
-				"prefix": moesifPrefix,
-			}).Debug("Skipped Event due to sampling percentage: " + strconv.Itoa(p.samplingPercentage) + " and random percentage: " + strconv.Itoa(randomPercentage))
+			p.log.Debug("Skipped Event due to sampling percentage: " + strconv.Itoa(p.samplingPercentage) + " and random percentage: " + strconv.Itoa(randomPercentage))
 			continue
 		}
 		// Add Weight to the Event Model
@@ -377,9 +490,7 @@ func (p *MoesifPump) WriteData(ctx context.Context, data []interface{}) error {
 
 		err = p.moesifAPI.QueueEvent(&event)
 		if err != nil {
-			log.WithFields(logrus.Fields{
-				"prefix": moesifPrefix,
-			}).Error("Error while writing ", data[dataIndex], err)
+			p.log.Error("Error while writing ", data[dataIndex], err)
 		}
 
 		if p.moesifAPI.GetETag() != "" &&
@@ -398,6 +509,7 @@ func (p *MoesifPump) WriteData(ctx context.Context, data []interface{}) error {
 			p.samplingPercentage, p.eTag, p.lastUpdatedTime = p.parseConfiguration(response)
 		}
 	}
+	p.log.Info("Purged ", len(data), " records...")
 
 	return nil
 }
@@ -456,4 +568,12 @@ func (p *MoesifPump) SetTimeout(timeout int) {
 
 func (p *MoesifPump) GetTimeout() int {
 	return p.timeout
+}
+
+func (p *MoesifPump) Shutdown() error {
+	if p.moesifConf.EnableBulk {
+		p.log.Info("Flushing bulked records...")
+		p.moesifAPI.Flush()
+	}
+	return nil
 }

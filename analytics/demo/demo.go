@@ -6,18 +6,22 @@ import (
 	"time"
 
 	"github.com/TykTechnologies/tyk-pump/analytics"
+	"github.com/TykTechnologies/tyk-pump/logger"
 
 	"github.com/gocraft/health"
-	uuid "github.com/satori/go.uuid"
+	"github.com/gofrs/uuid"
 )
 
-var apiKeys []string
-var apiID string
-var apiVersion string
+var (
+	apiKeys    []string
+	apiID      string
+	apiVersion string
+	log        = logger.GetLogger()
+)
 
 func DemoInit(orgId, apiId, version string) {
 	apiID = apiId
-	apiKeys = generateAPIKeys(orgId)
+	GenerateAPIKeys(orgId)
 	apiVersion = version
 	if version == "" {
 		apiVersion = "Default"
@@ -30,7 +34,7 @@ func randomInRange(min, max int) int {
 }
 
 func randomMethod() string {
-	var methods = []string{"GET", "PUT", "POST", "DELETE", "OPTIONS", "HEAD"}
+	methods := []string{"GET", "PUT", "POST", "DELETE", "OPTIONS", "HEAD"}
 
 	rand.Seed(time.Now().Unix())
 	return methods[rand.Intn(len(methods))]
@@ -116,68 +120,126 @@ func responseCode() int {
 	return codes[rand.Intn(len(codes))]
 }
 
-func generateAPIKeys(orgId string) []string {
+func GenerateAPIKeys(orgId string) {
 	set := make([]string, 50)
 	for i := 0; i < len(set); i++ {
 		set[i] = generateAPIKey(orgId)
 	}
-
-	return set
+	apiKeys = set
 }
 
 func generateAPIKey(orgId string) string {
-	u1 := uuid.NewV4()
+	u1, err := uuid.NewV4()
+	if err != nil {
+		log.WithError(err).Error("failed to generate UUID")
+	}
 	id := strings.Replace(u1.String(), "-", "", -1)
 	return orgId + id
 }
 
-func getRandomKey() string {
+func getRandomKey(orgId string) string {
+	if len(apiKeys) == 0 {
+		GenerateAPIKeys(orgId)
+	}
 	return apiKeys[rand.Intn(len(apiKeys))]
 }
 
-func GenerateDemoData(start time.Time, days int, orgId string, writer func([]interface{}, *health.Job, time.Time, int)) {
+func country() string {
+	codes := []string{
+		"RU",
+		"US",
+		"UK",
+	}
+	return codes[rand.Intn(len(codes))]
+}
+
+func GenerateDemoData(days, recordsPerHour int, orgID string, demoFutureData, trackPath bool, writer func([]interface{}, *health.Job, time.Time, int)) {
+	t := time.Now()
+	start := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
 	count := 0
-	finish := start.AddDate(0, 0, days)
-	for d := start; d.Before(finish); d = d.AddDate(0, 0, 1) {
-		set := []interface{}{}
-
-		// Generate daily entries
-		volume := randomInRange(100, 500)
-		for i := 0; i < volume; i++ {
-			p := randomPath()
-			api, apiID := randomAPI()
-			r := analytics.AnalyticsRecord{
-				Method:        randomMethod(),
-				Path:          p,
-				RawPath:       p,
-				ContentLength: int64(randomInRange(0, 999)),
-				UserAgent:     getUA(),
-				Day:           d.Day(),
-				Month:         d.Month(),
-				Year:          d.Year(),
-				Hour:          d.Hour(),
-				ResponseCode:  responseCode(),
-				APIKey:        getRandomKey(),
-				TimeStamp:     d,
-				APIVersion:    apiVersion,
-				APIName:       api,
-				APIID:         apiID,
-				OrgID:         orgId,
-				OauthID:       "",
-				RequestTime:   int64(randomInRange(0, 10)),
-				RawRequest:    "Qk9EWSBEQVRB",
-				RawResponse:   "UkVTUE9OU0UgREFUQQ==",
-				IPAddress:     "118.93.55.103",
-				Tags:          []string{"orgid-" + orgId, "apiid-" + apiID},
-				Alias:         "",
-				TrackPath:     true,
-				ExpireAt:      time.Now().Add(time.Hour * 8760),
+	// If we are generating future data, we want to start at the current date and create data for the next X days
+	if demoFutureData {
+		for d := 0; d < days; d++ {
+			for h := 0; h < 24; h++ {
+				WriteDemoData(start, d, h, recordsPerHour, orgID, trackPath, writer)
 			}
+			count++
+			log.Infof("Finished %d of %d\n", count, days)
+		}
+		return
+	}
 
-			set = append(set, r)
+	// Otherwise, we want to start at the (current date - X days) and create data until yesterday's date
+	for d := days; d > 0; d-- {
+		for h := 0; h < 24; h++ {
+			WriteDemoData(start, -d, h, recordsPerHour, orgID, trackPath, writer)
 		}
 		count++
-		writer(set, nil, time.Now(), 1)
-
+		log.Infof("Finished %d of %d\n", count, days)
 	}
+}
+
+func WriteDemoData(start time.Time, d, h, recordsPerHour int, orgID string, trackPath bool, writer func([]interface{}, *health.Job, time.Time, int)) {
+	set := []interface{}{}
+	ts := start.AddDate(0, 0, d)
+	ts = ts.Add(time.Duration(h) * time.Hour)
+	// Generate daily entries
+	var volume int
+	if recordsPerHour > 0 {
+		volume = recordsPerHour
+	} else {
+		volume = randomInRange(300, 500)
+	}
+	timeDifference := 3600 / volume // this is the difference in seconds between each record
+	nextTimestamp := ts             // this is the timestamp of the next record
+	for i := 0; i < volume; i++ {
+		r := GenerateRandomAnalyticRecord(orgID, trackPath)
+		r.Day = nextTimestamp.Day()
+		r.Month = nextTimestamp.Month()
+		r.Year = nextTimestamp.Year()
+		r.Hour = nextTimestamp.Hour()
+		r.TimeStamp = nextTimestamp
+		nextTimestamp = nextTimestamp.Add(time.Second * time.Duration(timeDifference))
+
+		set = append(set, r)
+	}
+
+	writer(set, nil, time.Now(), 10)
+}
+
+func GenerateRandomAnalyticRecord(orgID string, trackPath bool) analytics.AnalyticsRecord {
+	p := randomPath()
+	api, apiID := randomAPI()
+	ts := time.Now()
+	r := analytics.AnalyticsRecord{
+		Method:        randomMethod(),
+		Path:          p,
+		RawPath:       p,
+		ContentLength: int64(randomInRange(0, 999)),
+		UserAgent:     getUA(),
+		Day:           ts.Day(),
+		Month:         ts.Month(),
+		Year:          ts.Year(),
+		Hour:          ts.Hour(),
+		ResponseCode:  responseCode(),
+		APIKey:        getRandomKey(orgID),
+		TimeStamp:     ts,
+		APIVersion:    apiVersion,
+		APIName:       api,
+		APIID:         apiID,
+		OrgID:         orgID,
+		OauthID:       "",
+		RequestTime:   int64(randomInRange(0, 10)),
+		RawRequest:    "Qk9EWSBEQVRB",
+		RawResponse:   "UkVTUE9OU0UgREFUQQ==",
+		IPAddress:     "118.93.55.103",
+		Tags:          []string{"orgid-" + orgID, "apiid-" + apiID},
+		Alias:         "",
+		TrackPath:     trackPath,
+		ExpireAt:      time.Now().Add(time.Hour * 8760),
+	}
+
+	r.Geo.Country.ISOCode = country()
+
+	return r
 }

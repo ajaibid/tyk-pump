@@ -9,7 +9,6 @@ import (
 	"github.com/influxdata/influxdb/client/v2"
 	"github.com/mitchellh/mapstructure"
 
-	"github.com/TykTechnologies/logrus"
 	"github.com/TykTechnologies/tyk-pump/analytics"
 )
 
@@ -19,17 +18,29 @@ type InfluxPump struct {
 }
 
 var (
-	influxPrefix = "influx-pump"
-	table        = "analytics"
+	influxPrefix     = "influx-pump"
+	influxDefaultENV = PUMPS_ENV_PREFIX + "_INFLUX" + PUMPS_ENV_META_PREFIX
+	table            = "analytics"
 )
 
+// @PumpConf Influx
 type InfluxConf struct {
-	DatabaseName string   `mapstructure:"database_name"`
-	Addr         string   `mapstructure:"address"`
-	Username     string   `mapstructure:"username"`
-	Password     string   `mapstructure:"password"`
-	Fields       []string `mapstructure:"fields"`
-	Tags         []string `mapstructure:"tags"`
+	EnvPrefix string `mapstructure:"meta_env_prefix"`
+	// InfluxDB pump database name.
+	DatabaseName string `json:"database_name" mapstructure:"database_name"`
+	// InfluxDB pump host.
+	Addr string `json:"address" mapstructure:"address"`
+	// InfluxDB pump database username.
+	Username string `json:"username" mapstructure:"username"`
+	// InfluxDB pump database password.
+	Password string `json:"password" mapstructure:"password"`
+	// Define which Analytics fields should be sent to InfluxDB. Check the available
+	// fields in the example below. Default value is `["method",
+	// "path", "response_code", "api_key", "time_stamp", "api_version", "api_name", "api_id",
+	// "org_id", "oauth_id", "raw_request", "request_time", "raw_response", "ip_address"]`.
+	Fields []string `json:"fields" mapstructure:"fields"`
+	// List of tags to be added to the metric.
+	Tags []string `json:"tags" mapstructure:"tags"`
 }
 
 func (i *InfluxPump) New() Pump {
@@ -41,21 +52,25 @@ func (i *InfluxPump) GetName() string {
 	return "InfluxDB Pump"
 }
 
+func (i *InfluxPump) GetEnvPrefix() string {
+	return i.dbConf.EnvPrefix
+}
+
 func (i *InfluxPump) Init(config interface{}) error {
 	i.dbConf = &InfluxConf{}
-	err := mapstructure.Decode(config, &i.dbConf)
+	i.log = log.WithField("prefix", influxPrefix)
 
+	err := mapstructure.Decode(config, &i.dbConf)
 	if err != nil {
-		log.WithFields(logrus.Fields{
-			"prefix": influxPrefix,
-		}).Fatal("Failed to decode configuration: ", err)
+		i.log.Fatal("Failed to decode configuration: ", err)
 	}
+
+	processPumpEnvVars(i, i.log, i.dbConf, influxDefaultENV)
 
 	i.connect()
 
-	log.WithFields(logrus.Fields{
-		"prefix": influxPrefix,
-	}).Debug("Influx DB CS: ", i.dbConf.Addr)
+	i.log.Debug("Influx DB CS: ", i.dbConf.Addr)
+	i.log.Info(i.GetName() + " Initialized")
 
 	return nil
 }
@@ -68,9 +83,7 @@ func (i *InfluxPump) connect() client.Client {
 	})
 
 	if err != nil {
-		log.WithFields(logrus.Fields{
-			"prefix": influxPrefix,
-		}).Error("Influx connection failed:", err)
+		i.log.Error("Influx connection failed:", err)
 		time.Sleep(5 * time.Second)
 		i.connect()
 	}
@@ -81,6 +94,7 @@ func (i *InfluxPump) connect() client.Client {
 func (i *InfluxPump) WriteData(ctx context.Context, data []interface{}) error {
 	c := i.connect()
 	defer c.Close()
+	i.log.Debug("Attempting to write ", len(data), " records...")
 
 	bp, _ := client.NewBatchPoints(client.BatchPointsConfig{
 		Database:  i.dbConf.DatabaseName,
@@ -122,7 +136,6 @@ func (i *InfluxPump) WriteData(ctx context.Context, data []interface{}) error {
 			if err != nil {
 				tag = ""
 			} else {
-
 				// convert and remove surrounding quotes from tag value
 				tag = strings.Trim(string(b), "\"")
 			}
@@ -136,7 +149,7 @@ func (i *InfluxPump) WriteData(ctx context.Context, data []interface{}) error {
 
 		// New record
 		if pt, err = client.NewPoint(table, tags, fields, time.Now()); err != nil {
-			log.Error(err)
+			i.log.Error(err)
 			continue
 		}
 
@@ -146,6 +159,7 @@ func (i *InfluxPump) WriteData(ctx context.Context, data []interface{}) error {
 
 	// Now that all points are added, write the batch
 	c.Write(bp)
+	i.log.Info("Purged ", len(data), " records...")
 
 	return nil
 }

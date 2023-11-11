@@ -7,7 +7,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/TykTechnologies/logrus"
 	"github.com/TykTechnologies/tyk-pump/analytics"
 	lg "github.com/logzio/logzio-go"
 	"github.com/mitchellh/mapstructure"
@@ -16,6 +15,7 @@ import (
 const (
 	LogzioPumpPrefix = "logzio-pump"
 	LogzioPumpName   = "Logzio Pump"
+	logzioDefaultENV = PUMPS_ENV_PREFIX + "_LOGZIO" + PUMPS_ENV_META_PREFIX
 
 	defaultLogzioCheckDiskSpace = true
 	defaultLogzioDiskThreshold  = 98 // represent % of the disk
@@ -26,13 +26,24 @@ const (
 	maxDiskThreshold = 100
 )
 
+// @PumpConf Logzio
 type LogzioPumpConfig struct {
-	CheckDiskSpace bool   `mapstructure:"check_disk_space"`
-	DiskThreshold  int    `mapstructure:"disk_threshold"`
-	DrainDuration  string `mapstructure:"drain_duration"`
-	QueueDir       string `mapstructure:"queue_dir"`
-	Token          string `mapstructure:"token"`
-	URL            string `mapstructure:"url"`
+	EnvPrefix string `mapstructure:"meta_env_prefix"`
+	// Set the sender to check if it crosses the maximum allowed disk usage. Default value is
+	// `true`.
+	CheckDiskSpace bool `json:"check_disk_space" mapstructure:"check_disk_space"`
+	// Set disk queue threshold, once the threshold is crossed the sender will not enqueue the
+	// received logs. Default value is `98` (percentage of disk).
+	DiskThreshold int `json:"disk_threshold" mapstructure:"disk_threshold"`
+	// Set drain duration (flush logs on disk). Default value is `3s`.
+	DrainDuration string `json:"drain_duration" mapstructure:"drain_duration"`
+	// The directory for the queue.
+	QueueDir string `json:"queue_dir" mapstructure:"queue_dir"`
+	// Token for sending data to your logzio account.
+	Token string `json:"token" mapstructure:"token"`
+	// If you do not want to use the default Logzio url i.e. when using a proxy. Default is
+	// `https://listener.logz.io:8071`.
+	URL string `json:"url" mapstructure:"url"`
 }
 
 func NewLogzioPumpConfig() *LogzioPumpConfig {
@@ -92,31 +103,34 @@ func (p *LogzioPump) GetName() string {
 	return LogzioPumpName
 }
 
+func (p *LogzioPump) GetEnvPrefix() string {
+	return p.config.EnvPrefix
+}
+
 func (p *LogzioPump) Init(config interface{}) error {
 	p.config = NewLogzioPumpConfig()
+	p.log = log.WithField("prefix", LogzioPumpPrefix)
+
 	err := mapstructure.Decode(config, p.config)
 	if err != nil {
-		log.WithFields(logrus.Fields{
-			"prefix": LogzioPumpPrefix,
-		}).Fatalf("Failed to decode configuration: %s", err)
+		p.log.Fatalf("Failed to decode configuration: %s", err)
 	}
 
-	log.WithFields(logrus.Fields{
-		"prefix": pumpPrefix,
-	}).Infof("Initializing %s with the following configuration: %+v", pumpName, p.config)
+	processPumpEnvVars(p, p.log, p.config, logzioDefaultENV)
+
+	p.log.Debugf("Initializing %s with the following configuration: %+v", LogzioPumpName, p.config)
 
 	p.sender, err = NewLogzioClient(p.config)
 	if err != nil {
 		return err
 	}
+	p.log.Info(p.GetName() + " Initialized")
 
 	return nil
 }
 
 func (p *LogzioPump) WriteData(ctx context.Context, data []interface{}) error {
-	log.WithFields(logrus.Fields{
-		"prefix": pumpPrefix,
-	}).Info("Writing ", len(data), " records")
+	p.log.Debug("Attempting to write ", len(data), " records...")
 
 	for _, v := range data {
 		decoded := v.(analytics.AnalyticsRecord)
@@ -144,5 +158,7 @@ func (p *LogzioPump) WriteData(ctx context.Context, data []interface{}) error {
 
 		p.sender.Send(event)
 	}
+	p.log.Info("Purged ", len(data), " records...")
+
 	return nil
 }

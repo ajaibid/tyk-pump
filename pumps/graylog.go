@@ -8,7 +8,6 @@ import (
 	"github.com/mitchellh/mapstructure"
 	gelf "github.com/robertkowalski/graylog-golang"
 
-	"github.com/TykTechnologies/logrus"
 	"github.com/TykTechnologies/tyk-pump/analytics"
 )
 
@@ -18,13 +17,35 @@ type GraylogPump struct {
 	CommonPumpConfig
 }
 
+// @PumpConf Graylog
 type GraylogConf struct {
-	GraylogHost string   `mapstructure:"host"`
-	GraylogPort int      `mapstructure:"port"`
-	Tags        []string `mapstructure:"tags"`
+	EnvPrefix string `mapstructure:"meta_env_prefix"`
+	// Graylog host.
+	GraylogHost string `json:"host" mapstructure:"host"`
+	// Graylog port.
+	GraylogPort int `json:"port" mapstructure:"port"`
+	// List of tags to be added to the metric. The possible options are listed in the below example.
+	//
+	// If no tag is specified the fallback behaviour is to don't send anything.
+	// The possible values are:
+	// - `path`
+	// - `method`
+	// - `response_code`
+	// - `api_version`
+	// - `api_name`
+	// - `api_id`
+	// - `org_id`
+	// - `tracked`
+	// - `oauth_id`
+	// - `raw_request`
+	// - `raw_response`
+	// - `request_time`
+	// - `ip_address`
+	Tags []string `json:"tags" mapstructure:"tags"`
 }
 
 var graylogPrefix = "graylog-pump"
+var graylogDefaultENV = PUMPS_ENV_PREFIX + "_GRAYLOG" + PUMPS_ENV_META_PREFIX
 
 func (p *GraylogPump) New() Pump {
 	newPump := GraylogPump{}
@@ -35,14 +56,21 @@ func (p *GraylogPump) GetName() string {
 	return "Graylog Pump"
 }
 
+func (p *GraylogPump) GetEnvPrefix() string {
+	return p.conf.EnvPrefix
+}
+
 func (p *GraylogPump) Init(conf interface{}) error {
 	p.conf = &GraylogConf{}
+
+	p.log = log.WithField("prefix", graylogPrefix)
+
 	err := mapstructure.Decode(conf, &p.conf)
 	if err != nil {
-		log.WithFields(logrus.Fields{
-			"prefix": graylogPrefix,
-		}).Fatal("Failed to decode configuration: ", err)
+		p.log.Fatal("Failed to decode configuration: ", err)
 	}
+
+	processPumpEnvVars(p, p.log, p.conf, graylogDefaultENV)
 
 	if p.conf.GraylogHost == "" {
 		p.conf.GraylogHost = "localhost"
@@ -51,14 +79,13 @@ func (p *GraylogPump) Init(conf interface{}) error {
 	if p.conf.GraylogPort == 0 {
 		p.conf.GraylogPort = 1000
 	}
-	log.WithFields(logrus.Fields{
-		"prefix": graylogPrefix,
-	}).Info("GraylogHost:", p.conf.GraylogHost)
-	log.WithFields(logrus.Fields{
-		"prefix": graylogPrefix,
-	}).Info("GraylogPort:", p.conf.GraylogPort)
+	p.log.Info("GraylogHost:", p.conf.GraylogHost)
+	p.log.Info("GraylogPort:", p.conf.GraylogPort)
 
 	p.connect()
+
+	p.log.Info(p.GetName() + " Initialized")
+
 	return nil
 }
 
@@ -70,9 +97,7 @@ func (p *GraylogPump) connect() {
 }
 
 func (p *GraylogPump) WriteData(ctx context.Context, data []interface{}) error {
-	log.WithFields(logrus.Fields{
-		"prefix": graylogPrefix,
-	}).Debug("Writing ", len(data), " records")
+	p.log.Debug("Attempting to write ", len(data), " records...")
 
 	if p.client == nil {
 		p.connect()
@@ -84,17 +109,13 @@ func (p *GraylogPump) WriteData(ctx context.Context, data []interface{}) error {
 
 		rReq, err := base64.StdEncoding.DecodeString(record.RawRequest)
 		if err != nil {
-			log.WithFields(logrus.Fields{
-				"prefix": graylogPrefix,
-			}).Fatal(err)
+			p.log.Fatal(err)
 		}
 
 		rResp, err := base64.StdEncoding.DecodeString(record.RawResponse)
 
 		if err != nil {
-			log.WithFields(logrus.Fields{
-				"prefix": graylogPrefix,
-			}).Fatal(err)
+			p.log.Fatal(err)
 		}
 
 		mapping := map[string]interface{}{
@@ -109,6 +130,7 @@ func (p *GraylogPump) WriteData(ctx context.Context, data []interface{}) error {
 			"oauth_id":      record.OauthID,
 			"raw_request":   string(rReq),
 			"request_time":  record.RequestTime,
+			"ip_address":    record.IPAddress,
 			"raw_response":  string(rResp),
 		}
 
@@ -122,9 +144,7 @@ func (p *GraylogPump) WriteData(ctx context.Context, data []interface{}) error {
 
 		message, err := json.Marshal(messageMap)
 		if err != nil {
-			log.WithFields(logrus.Fields{
-				"prefix": graylogPrefix,
-			}).Fatal(err)
+			p.log.Fatal(err)
 		}
 
 		gelfData := map[string]interface{}{
@@ -137,16 +157,14 @@ func (p *GraylogPump) WriteData(ctx context.Context, data []interface{}) error {
 		gelfString, err := json.Marshal(gelfData)
 
 		if err != nil {
-			log.WithFields(logrus.Fields{
-				"prefix": graylogPrefix,
-			}).Fatal(err)
+			p.log.Fatal(err)
 		}
 
-		log.WithFields(logrus.Fields{
-			"prefix": graylogPrefix,
-		}).Debug("Writing ", string(message))
+		p.log.Debug("Writing ", string(message))
 
 		p.client.Log(string(gelfString))
 	}
+	p.log.Info("Purged ", len(data), " records...")
+
 	return nil
 }

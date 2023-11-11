@@ -1,43 +1,40 @@
 package logger
 
 import (
-	"github.com/TykTechnologies/logrus"
-	prefixed "github.com/TykTechnologies/logrus-prefixed-formatter"
 	"os"
 	"strings"
+
+	"github.com/sirupsen/logrus"
 )
 
 var log = logrus.New()
 
 func init() {
-	log.Formatter = GetFormatterWithForcedPrefix()
+	log.Level = level(os.Getenv("TYK_LOGLEVEL"))
+	log.Formatter = formatter()
 }
 
-func GetFormatterWithForcedPrefix() *prefixed.TextFormatter {
-	textFormatter := new(prefixed.TextFormatter)
-	textFormatter.ForceColors = true
-	textFormatter.TimestampFormat = `Jan 02 15:04:05`
-	return textFormatter
+func level(level string) logrus.Level {
+	switch strings.ToLower(level) {
+	case "error":
+		return logrus.ErrorLevel
+	case "warn":
+		return logrus.WarnLevel
+	case "debug":
+		return logrus.DebugLevel
+	default:
+		return logrus.InfoLevel
+	}
+}
+
+func formatter() *logrus.TextFormatter {
+	formatter := new(logrus.TextFormatter)
+	formatter.TimestampFormat = `Jan 02 15:04:05`
+	formatter.FullTimestamp = true
+	formatter.DisableColors = true
+	return formatter
 }
 
 func GetLogger() *logrus.Logger {
-	level := os.Getenv("TYK_LOGLEVEL")
-	if level == "" {
-		level = "info"
-	}
-
-	switch strings.ToLower(level) {
-	case "error":
-		log.Level = logrus.ErrorLevel
-	case "warn":
-		log.Level = logrus.WarnLevel
-	case "info":
-		log.Level = logrus.InfoLevel
-	case "debug":
-		log.Level = logrus.DebugLevel
-	default:
-		log.Level = logrus.InfoLevel
-	}
-
 	return log
 }
