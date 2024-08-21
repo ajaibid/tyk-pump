@@ -315,7 +315,13 @@ func filterData(pump pumps.Pump, keys []interface{}) []interface{} {
 	newLenght := 0
 
 	for _, key := range keys {
-		decoded := key.(analytics.AnalyticsRecord)
+		decoded, ok := key.(analytics.AnalyticsRecord)
+		if !ok {
+			log.WithFields(logrus.Fields{
+				"prefix": mainPrefix,
+			}).Warningf("Pump  %s is unable to decode to analytics record: %+v", pump.GetName(), key)
+			continue
+		}
 		if pump.GetOmitDetailedRecording() {
 			decoded.RawRequest = ""
 			decoded.RawResponse = ""
