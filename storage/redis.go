@@ -277,7 +277,17 @@ func (r *RedisClusterStorageManager) GetAndDeleteSet(keyName string, chunkSize i
 	vals := lrange.Val()
 
 	result := make([]interface{}, len(vals))
-	for i, v := range vals {
+unpacking:
+	for i := 0; i < len(result); i++ {
+		v := ""
+		for v == "" {
+			if len(vals) == 0 {
+				result = result[:i]
+				break unpacking
+			}
+			v = vals[0]
+			vals = vals[1:]
+		}
 		result[i] = v
 	}
 
