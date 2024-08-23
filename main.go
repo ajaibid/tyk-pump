@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"math/rand"
 	"os"
 	"os/signal"
 	"strings"
@@ -95,6 +96,14 @@ func Init() {
 		log.Level = logrus.DebugLevel
 	}
 
+}
+
+func randomDelay(minMs, maxMs int) {
+	delayMs := minMs + rand.Intn(maxMs-minMs)
+	log.Infof("Starting with delay of %d ms...", delayMs)
+
+	randomDuration := time.Duration(delayMs) * time.Millisecond
+	time.Sleep(randomDuration)
 }
 
 func setupAnalyticsStore() {
@@ -425,6 +434,9 @@ func execPumpWriting(wg *sync.WaitGroup, pmp pumps.Pump, keys *[]interface{}, pu
 func main() {
 	Init()
 	SetupInstrumentation()
+
+	randomDelay(500, 5000)
+
 	go server.ServeHealthCheck(SystemConfig.HealthCheckEndpointName, SystemConfig.HealthCheckEndpointPort, SystemConfig.HTTPProfile)
 
 	// Store version which will be read by dashboard and sent to
