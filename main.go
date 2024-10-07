@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/TykTechnologies/tyk-pump/analytics"
-	"github.com/TykTechnologies/tyk-pump/analytics/demo"
 	logger "github.com/TykTechnologies/tyk-pump/logger"
 	"github.com/TykTechnologies/tyk-pump/pumps"
 	"github.com/TykTechnologies/tyk-pump/serializer"
@@ -204,6 +203,10 @@ func initialiseUptimePump() {
 }
 
 func StartPurgeLoop(wg *sync.WaitGroup, ctx context.Context, secInterval int, chunkSize int64, expire time.Duration, omitDetails bool) {
+
+	analyticsItemsCh := make(chan analytics.AnalyticsItems)
+	writeToPumps(analyticsItemsCh)
+
 	for range time.Tick(time.Duration(secInterval) * time.Second) {
 
 		job := instrument.NewJob("PumpRecordsPurge")
@@ -222,7 +225,7 @@ func StartPurgeLoop(wg *sync.WaitGroup, ctx context.Context, secInterval int, ch
 				analyticsKeyName += serializerMethod.GetSuffix()
 				AnalyticsValues := AnalyticsStore.GetAndDeleteSet(analyticsKeyName, chunkSize, expire)
 				if len(AnalyticsValues) > 0 {
-					PreprocessAnalyticsValues(AnalyticsValues, serializerMethod, analyticsKeyName, omitDetails, job, startTime, secInterval)
+					analyticsItemsCh <- PreprocessAnalyticsValues(AnalyticsValues, serializerMethod, analyticsKeyName, omitDetails, job, startTime, secInterval)
 				}
 			}
 
@@ -241,7 +244,7 @@ func StartPurgeLoop(wg *sync.WaitGroup, ctx context.Context, secInterval int, ch
 	}
 }
 
-func PreprocessAnalyticsValues(AnalyticsValues []interface{}, serializerMethod serializer.AnalyticsSerializer, analyticsKeyName string, omitDetails bool, job *health.Job, startTime time.Time, secInterval int) {
+func PreprocessAnalyticsValues(AnalyticsValues []interface{}, serializerMethod serializer.AnalyticsSerializer, analyticsKeyName string, omitDetails bool, job *health.Job, startTime time.Time, secInterval int) analytics.AnalyticsItems {
 	keys := make([]interface{}, len(AnalyticsValues))
 
 	for i, v := range AnalyticsValues {
@@ -261,8 +264,13 @@ func PreprocessAnalyticsValues(AnalyticsValues []interface{}, serializerMethod s
 		keys[i] = interface{}(decoded)
 		job.Event("record")
 	}
-	// Send to pumps
-	writeToPumps(keys, job, startTime, int(secInterval))
+
+	return analytics.AnalyticsItems{
+		Keys:        keys,
+		Job:         job,
+		StartTime:   startTime,
+		SecInterval: secInterval,
+	}
 }
 
 func checkShutdown(ctx context.Context, wg *sync.WaitGroup) bool {
@@ -290,19 +298,21 @@ func checkShutdown(ctx context.Context, wg *sync.WaitGroup) bool {
 	return shutdown
 }
 
-func writeToPumps(keys []interface{}, job *health.Job, startTime time.Time, purgeDelay int) {
+func writeToPumps(analyticsItemsCh chan analytics.AnalyticsItems) {
 	// Send to pumps
-	if Pumps != nil {
-		var wg sync.WaitGroup
-		wg.Add(len(Pumps))
-		for _, pmp := range Pumps {
-			go execPumpWriting(&wg, pmp, &keys, purgeDelay, startTime, job)
-		}
-		wg.Wait()
-	} else {
+	if Pumps == nil {
 		log.WithFields(logrus.Fields{
 			"prefix": mainPrefix,
 		}).Warning("No pumps defined!")
+		return
+	}
+	
+	for _, pmp := range Pumps {
+		go func() {
+			for item := range analyticsItemsCh {
+				execPumpWriting(pmp, &item.Keys, item.SecInterval, item.StartTime, item.Job)
+			}
+		}()
 	}
 }
 
@@ -369,7 +379,7 @@ func filterData(pump pumps.Pump, keys []interface{}) []interface{} {
 	return filteredKeys
 }
 
-func execPumpWriting(wg *sync.WaitGroup, pmp pumps.Pump, keys *[]interface{}, purgeDelay int, startTime time.Time, job *health.Job) {
+func execPumpWriting(pmp pumps.Pump, keys *[]interface{}, purgeDelay int, startTime time.Time, job *health.Job) {
 	timer := time.AfterFunc(time.Duration(purgeDelay)*time.Second, func() {
 		if pmp.GetTimeout() == 0 {
 			log.WithFields(logrus.Fields{
@@ -382,7 +392,6 @@ func execPumpWriting(wg *sync.WaitGroup, pmp pumps.Pump, keys *[]interface{}, pu
 		}
 	})
 	defer timer.Stop()
-	defer wg.Done()
 
 	log.WithFields(logrus.Fields{
 		"prefix": mainPrefix,
@@ -448,13 +457,6 @@ func main() {
 
 	// prime the pumps
 	initialisePumps()
-	if *demoMode != "" {
-		log.Info("BUILDING DEMO DATA AND EXITING...")
-		log.Warning("Starting from date: ", time.Now().AddDate(0, 0, -30))
-		demo.DemoInit(*demoMode, *demoApiMode, *demoApiVersionMode)
-		demo.GenerateDemoData(*demoDays, *demoRecordsPerHour, *demoMode, *demoFutureData, *demoTrackPath, writeToPumps)
-		return
-	}
 
 	if SystemConfig.PurgeChunk > 0 {
 		log.WithField("PurgeChunk", SystemConfig.PurgeChunk).Info("PurgeChunk enabled")
