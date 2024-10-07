@@ -306,14 +306,17 @@ func writeToPumps(analyticsItemsCh chan analytics.AnalyticsItems) {
 		}).Warning("No pumps defined!")
 		return
 	}
-	
-	for _, pmp := range Pumps {
-		go func() {
-			for item := range analyticsItemsCh {
+
+	go func() {
+		for item := range analyticsItemsCh {
+			for _, pmp := range Pumps {
+				log.WithFields(logrus.Fields{
+					"prefix": mainPrefix,
+				}).Info("Execute Pump Goroutine: ", pmp.GetName(), " for ", len(item.Keys), " records")
 				execPumpWriting(pmp, &item.Keys, item.SecInterval, item.StartTime, item.Job)
 			}
-		}()
-	}
+		}
+	}()
 }
 
 func filterData(pump pumps.Pump, keys []interface{}) []interface{} {
