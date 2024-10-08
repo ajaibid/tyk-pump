@@ -3,6 +3,7 @@ package analytics
 import (
 	"bytes"
 	"fmt"
+	"github.com/gocraft/health"
 	"net"
 	"sort"
 	"strconv"
@@ -39,6 +40,13 @@ type Latency struct {
 }
 
 const SQLTable = "tyk_analytics"
+
+type AnalyticsItems struct {
+	Keys        []interface{}
+	Job         *health.Job
+	StartTime   time.Time
+	SecInterval int
+}
 
 // AnalyticsRecord encodes the details of a request
 type AnalyticsRecord struct {
