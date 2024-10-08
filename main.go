@@ -308,6 +308,9 @@ func writeToPumps(analyticsItemsCh chan analytics.AnalyticsItems) {
 	}
 
 	go func() {
+		log.WithFields(logrus.Fields{
+			"prefix": mainPrefix,
+		}).Info("Establish channel execution for ", len(Pumps), " pumps")
 		for item := range analyticsItemsCh {
 			for _, pmp := range Pumps {
 				log.WithFields(logrus.Fields{
