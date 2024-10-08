@@ -313,9 +313,6 @@ func writeToPumps(analyticsItemsCh chan analytics.AnalyticsItems) {
 		}).Info("Establish channel execution for ", len(Pumps), " pumps")
 		for item := range analyticsItemsCh {
 			for _, pmp := range Pumps {
-				log.WithFields(logrus.Fields{
-					"prefix": mainPrefix,
-				}).Info("Execute Pump Goroutine: ", pmp.GetName(), " for ", len(item.Keys), " records")
 				execPumpWriting(pmp, &item.Keys, item.SecInterval, item.StartTime, item.Job)
 			}
 		}
