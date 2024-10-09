@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -479,6 +480,13 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	go StartPurgeLoop(&wg, ctx, SystemConfig.PurgeDelay, SystemConfig.PurgeChunk, time.Duration(SystemConfig.StorageExpirationTime)*time.Second, SystemConfig.OmitDetailedRecording)
 
+	go func() {
+		for {
+			logMemoryUsage()
+			time.Sleep(1 * time.Minute)
+		}
+	}()
+
 	termChan := make(chan os.Signal, 1)
 	signal.Notify(termChan, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 	<-termChan // Blocks here until either SIGINT or SIGTERM is received.
@@ -487,4 +495,14 @@ func main() {
 	log.WithFields(logrus.Fields{
 		"prefix": mainPrefix,
 	}).Info("Tyk-pump stopped.")
+}
+
+func logMemoryUsage() {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	log.Printf("Memory stats: Alloc = %vMiB, Sys = %vMiB, NumGC = %v", bToMb(m.Alloc), bToMb(m.Sys), m.NumGC)
+}
+
+func bToMb(b uint64) uint64 {
+	return b / 1024 / 1024
 }
