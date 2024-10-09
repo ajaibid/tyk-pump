@@ -26,6 +26,7 @@ type KafkaPump struct {
 	writerConfig kafka.WriterConfig
 	log          *logrus.Entry
 	CommonPumpConfig
+	kafkaWriter *kafka.Writer
 }
 
 type Json map[string]interface{}
@@ -182,6 +183,8 @@ func (k *KafkaPump) Init(config interface{}) error {
 
 	k.log.Info(k.GetName() + " Initialized")
 
+	k.kafkaWriter = kafka.NewWriter(k.writerConfig)
+
 	return nil
 }
 
@@ -269,12 +272,5 @@ func (k *KafkaPump) WriteData(ctx context.Context, data []interface{}) error {
 }
 
 func (k *KafkaPump) write(ctx context.Context, messages []kafka.Message) error {
-	kafkaWriter := kafka.NewWriter(k.writerConfig)
-	defer func(kafkaWriter *kafka.Writer) {
-		err := kafkaWriter.Close()
-		if err != nil {
-			k.log.Error("unable to close Kafka writer: ", err)
-		}
-	}(kafkaWriter)
-	return kafkaWriter.WriteMessages(ctx, messages...)
+	return k.kafkaWriter.WriteMessages(ctx, messages...)
 }
