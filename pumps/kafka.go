@@ -190,79 +190,73 @@ func (k *KafkaPump) WriteData(ctx context.Context, data []interface{}) error {
 	k.log.Debug("Attempting to write ", len(data), " records...")
 	kafkaMessages := make([]kafka.Message, len(data))
 	for i, v := range data {
-		select {
-		case <-ctx.Done():
-			k.log.WithError(ctx.Err()).Warn("Context canceled while sending Kafka message")
-			return nil
-		default:
-			//Build message format
-			decoded := v.(analytics.AnalyticsRecord)
-			message := Json{
-				"timestamp":       decoded.TimeStamp,
-				"method":          decoded.Method,
-				"path":            decoded.Path,
-				"raw_path":        decoded.RawPath,
-				"response_code":   decoded.ResponseCode,
-				"alias":           decoded.Alias,
-				"api_key":         decoded.APIKey,
-				"api_name":        decoded.APIName,
-				"api_id":          decoded.APIID,
-				"request_time_ms": decoded.RequestTime,
-				"ip_address":      decoded.IPAddress,
-				"host":            decoded.Host,
-				"content_length":  decoded.ContentLength,
-				"user_agent":      decoded.UserAgent,
-			}
-			// Filter only expose raw request response for certain status
-			if val, ok := k.kafkaConf.MetaData["detailed_log_for_status"]; ok {
-				if strings.Contains(val, strconv.Itoa(decoded.ResponseCode)) {
-					filteredRequestB, _ := base64.StdEncoding.DecodeString(decoded.RawRequest)
-					filteredRequest := string(filteredRequestB)
-					if hideHeader, ok2 := k.kafkaConf.MetaData["hide_request_header"]; ok2 {
-						hideHeaderArr := strings.Split(hideHeader, ",")
+		//Build message format
+		decoded := v.(analytics.AnalyticsRecord)
+		message := Json{
+			"timestamp":       decoded.TimeStamp,
+			"method":          decoded.Method,
+			"path":            decoded.Path,
+			"raw_path":        decoded.RawPath,
+			"response_code":   decoded.ResponseCode,
+			"alias":           decoded.Alias,
+			"api_key":         decoded.APIKey,
+			"api_name":        decoded.APIName,
+			"api_id":          decoded.APIID,
+			"request_time_ms": decoded.RequestTime,
+			"ip_address":      decoded.IPAddress,
+			"host":            decoded.Host,
+			"content_length":  decoded.ContentLength,
+			"user_agent":      decoded.UserAgent,
+		}
+		// Filter only expose raw request response for certain status
+		if val, ok := k.kafkaConf.MetaData["detailed_log_for_status"]; ok {
+			if strings.Contains(val, strconv.Itoa(decoded.ResponseCode)) {
+				filteredRequestB, _ := base64.StdEncoding.DecodeString(decoded.RawRequest)
+				filteredRequest := string(filteredRequestB)
+				if hideHeader, ok2 := k.kafkaConf.MetaData["hide_request_header"]; ok2 {
+					hideHeaderArr := strings.Split(hideHeader, ",")
 
-						hideBody, _ := k.kafkaConf.MetaData["hide_request_body_key"]
-						hideBodyArr := strings.Split(hideBody, ",")
+					hideBody, _ := k.kafkaConf.MetaData["hide_request_body_key"]
+					hideBodyArr := strings.Split(hideBody, ",")
 
-						rawDecodedData, _ := decodeRawData(filteredRequest, hideHeaderArr, hideBodyArr, false)
-						filteredRequestByte, _ := json.Marshal(rawDecodedData)
-						filteredRequest = string(filteredRequestByte)
-					}
-
-					rawResponseDecodedB, _ := base64.StdEncoding.DecodeString(decoded.RawResponse)
-					rawResponseDecoded := string(rawResponseDecodedB)
-					message["raw_request"] = filteredRequest
-					message["raw_response"] = rawResponseDecoded
+					rawDecodedData, _ := decodeRawData(filteredRequest, hideHeaderArr, hideBodyArr, false)
+					filteredRequestByte, _ := json.Marshal(rawDecodedData)
+					filteredRequest = string(filteredRequestByte)
 				}
-			}
 
-			if val, ok := k.kafkaConf.MetaData["include_tag"]; ok {
-				prefixes := strings.Split(val, ",")
-				for _, prefix := range prefixes {
-					for _, tagContent := range decoded.Tags {
-						if strings.HasPrefix(tagContent, prefix) {
-							message[prefix] = strings.TrimPrefix(tagContent, prefix)[1:]
-						}
+				rawResponseDecodedB, _ := base64.StdEncoding.DecodeString(decoded.RawResponse)
+				rawResponseDecoded := string(rawResponseDecodedB)
+				message["raw_request"] = filteredRequest
+				message["raw_response"] = rawResponseDecoded
+			}
+		}
+
+		if val, ok := k.kafkaConf.MetaData["include_tag"]; ok {
+			prefixes := strings.Split(val, ",")
+			for _, prefix := range prefixes {
+				for _, tagContent := range decoded.Tags {
+					if strings.HasPrefix(tagContent, prefix) {
+						message[prefix] = strings.TrimPrefix(tagContent, prefix)[1:]
 					}
 				}
 			}
+		}
 
-			//Add static metadata to json
-			for key, value := range k.kafkaConf.MetaData {
-				message[key] = value
-			}
+		//Add static metadata to json
+		for key, value := range k.kafkaConf.MetaData {
+			message[key] = value
+		}
 
-			//Transform object to json string
-			json, jsonError := json.Marshal(message)
-			if jsonError != nil {
-				k.log.WithError(jsonError).Error("unable to marshal message")
-			}
+		//Transform object to json string
+		json, jsonError := json.Marshal(message)
+		if jsonError != nil {
+			k.log.WithError(jsonError).Error("unable to marshal message")
+		}
 
-			//Kafka message structure
-			kafkaMessages[i] = kafka.Message{
-				Time:  time.Now(),
-				Value: json,
-			}
+		//Kafka message structure
+		kafkaMessages[i] = kafka.Message{
+			Time:  time.Now(),
+			Value: json,
 		}
 	}
 	//Send kafka message
