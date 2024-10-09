@@ -193,7 +193,7 @@ func (k *KafkaPump) WriteData(ctx context.Context, data []interface{}) error {
 		select {
 		case <-ctx.Done():
 			k.log.WithError(ctx.Err()).Warn("Context canceled while sending Kafka message")
-			return ctx.Err()
+			return nil
 		default:
 			//Build message format
 			decoded := v.(analytics.AnalyticsRecord)
