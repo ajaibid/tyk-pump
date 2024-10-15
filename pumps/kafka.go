@@ -3,8 +3,8 @@ package pumps
 import (
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"encoding/base64"
+	"encoding/json"
 	"os"
 	"strconv"
 	"strings"
@@ -26,6 +26,7 @@ type KafkaPump struct {
 	writerConfig kafka.WriterConfig
 	log          *logrus.Entry
 	CommonPumpConfig
+	kafkaWriter *kafka.Writer
 }
 
 type Json map[string]interface{}
@@ -180,6 +181,8 @@ func (k *KafkaPump) Init(config interface{}) error {
 		k.writerConfig.CompressionCodec = snappy.NewCompressionCodec()
 	}
 
+	k.kafkaWriter = kafka.NewWriter(k.writerConfig)
+
 	k.log.Info(k.GetName() + " Initialized")
 
 	return nil
@@ -210,37 +213,37 @@ func (k *KafkaPump) WriteData(ctx context.Context, data []interface{}) error {
 		}
 		// Filter only expose raw request response for certain status
 		if val, ok := k.kafkaConf.MetaData["detailed_log_for_status"]; ok {
-                if strings.Contains(val, strconv.Itoa(decoded.ResponseCode)) {
-                    filteredRequestB, _ := base64.StdEncoding.DecodeString(decoded.RawRequest)
-                    filteredRequest := string(filteredRequestB)
-                    if hideHeader, ok2 := k.kafkaConf.MetaData["hide_request_header"]; ok2 {
-                        hideHeaderArr := strings.Split(hideHeader, ",")
+			if strings.Contains(val, strconv.Itoa(decoded.ResponseCode)) {
+				filteredRequestB, _ := base64.StdEncoding.DecodeString(decoded.RawRequest)
+				filteredRequest := string(filteredRequestB)
+				if hideHeader, ok2 := k.kafkaConf.MetaData["hide_request_header"]; ok2 {
+					hideHeaderArr := strings.Split(hideHeader, ",")
 
-                        hideBody, _ := k.kafkaConf.MetaData["hide_request_body_key"]
-                        hideBodyArr := strings.Split(hideBody, ",")
+					hideBody, _ := k.kafkaConf.MetaData["hide_request_body_key"]
+					hideBodyArr := strings.Split(hideBody, ",")
 
-                        rawDecodedData, _ := decodeRawData(filteredRequest, hideHeaderArr, hideBodyArr, false)
-                        filteredRequestByte, _ := json.Marshal(rawDecodedData)
-                        filteredRequest = string(filteredRequestByte)
-                    }
+					rawDecodedData, _ := decodeRawData(filteredRequest, hideHeaderArr, hideBodyArr, false)
+					filteredRequestByte, _ := json.Marshal(rawDecodedData)
+					filteredRequest = string(filteredRequestByte)
+				}
 
-                    rawResponseDecodedB, _ := base64.StdEncoding.DecodeString(decoded.RawResponse)
-                    rawResponseDecoded := string(rawResponseDecodedB)
-                    message["raw_request"] = filteredRequest
-                    message["raw_response"] = rawResponseDecoded
-                }
-            }
+				rawResponseDecodedB, _ := base64.StdEncoding.DecodeString(decoded.RawResponse)
+				rawResponseDecoded := string(rawResponseDecodedB)
+				message["raw_request"] = filteredRequest
+				message["raw_response"] = rawResponseDecoded
+			}
+		}
 
-            if val, ok := k.kafkaConf.MetaData["include_tag"]; ok {
-                prefixes := strings.Split(val, ",")
-                for _, prefix := range prefixes {
-                    for _, tagContent := range decoded.Tags {
-                        if strings.HasPrefix(tagContent, prefix) {
-                            message[prefix] = strings.TrimPrefix(tagContent, prefix)[1:]
-                        }
-                    }
-                }
-            }
+		if val, ok := k.kafkaConf.MetaData["include_tag"]; ok {
+			prefixes := strings.Split(val, ",")
+			for _, prefix := range prefixes {
+				for _, tagContent := range decoded.Tags {
+					if strings.HasPrefix(tagContent, prefix) {
+						message[prefix] = strings.TrimPrefix(tagContent, prefix)[1:]
+					}
+				}
+			}
+		}
 
 		//Add static metadata to json
 		for key, value := range k.kafkaConf.MetaData {
@@ -269,7 +272,5 @@ func (k *KafkaPump) WriteData(ctx context.Context, data []interface{}) error {
 }
 
 func (k *KafkaPump) write(ctx context.Context, messages []kafka.Message) error {
-	kafkaWriter := kafka.NewWriter(k.writerConfig)
-	defer kafkaWriter.Close()
-	return kafkaWriter.WriteMessages(ctx, messages...)
+	return k.kafkaWriter.WriteMessages(ctx, messages...)
 }
