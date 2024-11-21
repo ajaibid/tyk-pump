@@ -3,9 +3,11 @@ package pumps
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/TykTechnologies/tyk-pump/analytics"
@@ -193,27 +195,62 @@ func (k *KafkaPump) WriteData(ctx context.Context, data []interface{}) error {
 		//Build message format
 		decoded := v.(analytics.AnalyticsRecord)
 		message := Json{
-			"timestamp":       decoded.TimeStamp,
-			"method":          decoded.Method,
-			"path":            decoded.Path,
-			"raw_path":        decoded.RawPath,
-			"response_code":   decoded.ResponseCode,
-			"alias":           decoded.Alias,
-			"api_key":         decoded.APIKey,
-			"api_version":     decoded.APIVersion,
-			"api_name":        decoded.APIName,
-			"api_id":          decoded.APIID,
-			"org_id":          decoded.OrgID,
-			"oauth_id":        decoded.OauthID,
-			"raw_request":     decoded.RawRequest,
+			"timestamp":     decoded.TimeStamp,
+			"method":        decoded.Method,
+			"path":          decoded.Path,
+			"raw_path":      decoded.RawPath,
+			"response_code": decoded.ResponseCode,
+			"alias":         decoded.Alias,
+			"api_key":       decoded.APIKey,
+			//"api_version":     decoded.APIVersion,
+			"api_name": decoded.APIName,
+			"api_id":   decoded.APIID,
+			//"org_id":          decoded.OrgID,
+			//"oauth_id":        decoded.OauthID,
+			//"raw_request":     decoded.RawRequest,
 			"request_time_ms": decoded.RequestTime,
-			"raw_response":    decoded.RawResponse,
-			"ip_address":      decoded.IPAddress,
-			"host":            decoded.Host,
-			"content_length":  decoded.ContentLength,
-			"user_agent":      decoded.UserAgent,
-			"tags":            decoded.Tags,
+			//"raw_response":    decoded.RawResponse,
+			"ip_address":     decoded.IPAddress,
+			"host":           decoded.Host,
+			"content_length": decoded.ContentLength,
+			"user_agent":     decoded.UserAgent,
+			//"tags":            decoded.Tags,
 		}
+
+		// Filter only expose raw request response for certain status
+		if val, ok := k.kafkaConf.MetaData["detailed_log_for_status"]; ok {
+			if strings.Contains(val, strconv.Itoa(decoded.ResponseCode)) {
+				filteredRequestB, _ := base64.StdEncoding.DecodeString(decoded.RawRequest)
+				filteredRequest := string(filteredRequestB)
+				if hideHeader, ok2 := k.kafkaConf.MetaData["hide_request_header"]; ok2 {
+					hideHeaderArr := strings.Split(hideHeader, ",")
+
+					hideBody, _ := k.kafkaConf.MetaData["hide_request_body_key"]
+					hideBodyArr := strings.Split(hideBody, ",")
+
+					rawDecodedData, _ := decodeRawData(filteredRequest, hideHeaderArr, hideBodyArr, false)
+					filteredRequestByte, _ := json.Marshal(rawDecodedData)
+					filteredRequest = string(filteredRequestByte)
+				}
+
+				rawResponseDecodedB, _ := base64.StdEncoding.DecodeString(decoded.RawResponse)
+				rawResponseDecoded := string(rawResponseDecodedB)
+				message["raw_request"] = filteredRequest
+				message["raw_response"] = rawResponseDecoded
+			}
+		}
+
+		if val, ok := k.kafkaConf.MetaData["include_tag"]; ok {
+			prefixes := strings.Split(val, ",")
+			for _, prefix := range prefixes {
+				for _, tagContent := range decoded.Tags {
+					if strings.HasPrefix(tagContent, prefix) {
+						message[prefix] = strings.TrimPrefix(tagContent, prefix)[1:]
+					}
+				}
+			}
+		}
+
 		//Add static metadata to json
 		for key, value := range k.kafkaConf.MetaData {
 			message[key] = value
@@ -236,7 +273,7 @@ func (k *KafkaPump) WriteData(ctx context.Context, data []interface{}) error {
 	if kafkaError != nil {
 		k.log.WithError(kafkaError).Error("unable to write message")
 	}
-	k.log.Debug("ElapsedTime in seconds for ", len(data), " records:", time.Now().Sub(startTime))
+	k.log.Info("ElapsedTime in ms for ", len(data), " records:", time.Since(startTime).Milliseconds())
 	k.log.Info("Purged ", len(data), " records...")
 	return nil
 }
