@@ -1,5 +1,7 @@
 package analytics
 
+import "regexp"
+
 type AnalyticsFilters struct {
 	// Filters pump data by an allow list of org_ids.
 	OrgsIDs []string `json:"org_ids"`
@@ -13,6 +15,8 @@ type AnalyticsFilters struct {
 	SkippedAPIIDs []string `json:"skip_api_ids"`
 	// Filters pump data by a block list of response_codes.
 	SkippedResponseCodes []int `json:"skip_response_codes"`
+	// Filters pump data by a block list of paths that contain a specific string.
+	SkipPathContainsRegex string `json:"skip_path_contains_regex"`
 }
 
 func (filters AnalyticsFilters) ShouldFilter(record AnalyticsRecord) bool {
@@ -29,12 +33,15 @@ func (filters AnalyticsFilters) ShouldFilter(record AnalyticsRecord) bool {
 		return true
 	case len(filters.ResponseCodes) > 0 && !intInSlice(record.ResponseCode, filters.ResponseCodes):
 		return true
+	case len(filters.SkipPathContainsRegex) > 0:
+		regexMatch, _ := regexp.MatchString(filters.SkipPathContainsRegex, record.Path)
+		return regexMatch
 	}
 	return false
 }
 
 func (filters AnalyticsFilters) HasFilter() bool {
-	if len(filters.SkippedAPIIDs) == 0 && len(filters.SkippedOrgsIDs) == 0 && len(filters.ResponseCodes) == 0 && len(filters.APIIDs) == 0 && len(filters.OrgsIDs) == 0 && len(filters.SkippedResponseCodes) == 0 {
+	if len(filters.SkippedAPIIDs) == 0 && len(filters.SkippedOrgsIDs) == 0 && len(filters.ResponseCodes) == 0 && len(filters.APIIDs) == 0 && len(filters.OrgsIDs) == 0 && len(filters.SkippedResponseCodes) == 0 && len(filters.SkipPathContainsRegex) == 0 {
 		return false
 	}
 	return true

@@ -11,6 +11,7 @@ func TestShouldFilter(t *testing.T) {
 		APIID:        "apiid123",
 		OrgID:        "orgid123",
 		ResponseCode: 200,
+		Path:         "/stock/healthcheck/login",
 	}
 
 	tcs := []struct {
@@ -93,6 +94,13 @@ func TestShouldFilter(t *testing.T) {
 				APIIDs:        []string{"apiid123"},
 			},
 			expectedFiltering: false,
+		},
+		{
+			testName: "skip analytics filters",
+			filter: AnalyticsFilters{
+				SkipPathContainsRegex: "login",
+			},
+			expectedFiltering: true,
 		},
 	}
 
