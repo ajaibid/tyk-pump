@@ -129,11 +129,12 @@ func NewRedisClusterPool(forceReconnect bool, config RedisStorageConfig) redis.U
 		Username:         config.Username,
 		Password:         config.Password,
 		PoolSize:         maxActive,
-		IdleTimeout:      240 * time.Second,
-		ReadTimeout:      timeout,
-		WriteTimeout:     timeout,
-		DialTimeout:      timeout,
-		TLSConfig:        tlsConfig,
+
+		ConnMaxIdleTime: 240 * time.Second,
+		ReadTimeout:     timeout,
+		WriteTimeout:    timeout,
+		DialTimeout:     timeout,
+		TLSConfig:       tlsConfig,
 	}
 
 	if opts.MasterName != "" {
