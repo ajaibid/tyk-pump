@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"
 
 	"github.com/kelseyhightower/envconfig"
@@ -254,16 +254,10 @@ func (r *RedisClusterStorageManager) GetAndDeleteSet(keyName string, chunkSize i
 
 	var lrange *redis.StringSliceCmd
 	_, err := r.db.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
-		lrange = pipe.LRange(ctx, fixedKey, 0, chunkSize-1)
+		lrange = pipe.LPopCount(ctx, fixedKey, int(chunkSize))
 
-		if chunkSize == 0 {
-			pipe.Del(ctx, fixedKey)
-		} else {
-			pipe.LTrim(ctx, fixedKey, chunkSize, -1)
-
-			// extend expiry after successful LTRIM
-			pipe.Expire(ctx, fixedKey, expire)
-		}
+		// extend expiry after successful LTRIM
+		pipe.Expire(ctx, fixedKey, expire)
 		return nil
 	})
 
