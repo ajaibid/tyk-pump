@@ -261,11 +261,18 @@ func (r *RedisClusterStorageManager) GetAndDeleteSet(keyName string, chunkSize i
 		pipe.Expire(ctx, fixedKey, expire)
 		return nil
 	})
-
-	if err != nil {
+	// Check for redis.Nil
+	if lrange.Err() == redis.Nil {
 		log.WithFields(logrus.Fields{
 			"prefix": redisLogPrefix,
-		}).Error("Multi command failed: ", err)
+		}).Trace("List is empty, nothing to pop")
+		return nil
+	}
+
+	if err != nil || lrange.Err() != nil {
+		log.WithFields(logrus.Fields{
+			"prefix": redisLogPrefix,
+		}).Error("LPopCount command failed: ", err)
 		r.Connect()
 	}
 
