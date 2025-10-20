@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"
 
 	"github.com/kelseyhightower/envconfig"
@@ -129,11 +129,12 @@ func NewRedisClusterPool(forceReconnect bool, config RedisStorageConfig) redis.U
 		Username:         config.Username,
 		Password:         config.Password,
 		PoolSize:         maxActive,
-		IdleTimeout:      240 * time.Second,
-		ReadTimeout:      timeout,
-		WriteTimeout:     timeout,
-		DialTimeout:      timeout,
-		TLSConfig:        tlsConfig,
+
+		ConnMaxIdleTime: 240 * time.Second,
+		ReadTimeout:     timeout,
+		WriteTimeout:    timeout,
+		DialTimeout:     timeout,
+		TLSConfig:       tlsConfig,
 	}
 
 	if opts.MasterName != "" {
@@ -254,23 +255,24 @@ func (r *RedisClusterStorageManager) GetAndDeleteSet(keyName string, chunkSize i
 
 	var lrange *redis.StringSliceCmd
 	_, err := r.db.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
-		lrange = pipe.LRange(ctx, fixedKey, 0, chunkSize-1)
+		lrange = pipe.LPopCount(ctx, fixedKey, int(chunkSize))
 
-		if chunkSize == 0 {
-			pipe.Del(ctx, fixedKey)
-		} else {
-			pipe.LTrim(ctx, fixedKey, chunkSize, -1)
-
-			// extend expiry after successful LTRIM
-			pipe.Expire(ctx, fixedKey, expire)
-		}
+		// extend expiry after successful LTRIM
+		pipe.Expire(ctx, fixedKey, expire)
 		return nil
 	})
-
-	if err != nil {
+	// Check for redis.Nil
+	if lrange.Err() == redis.Nil {
 		log.WithFields(logrus.Fields{
 			"prefix": redisLogPrefix,
-		}).Error("Multi command failed: ", err)
+		}).Trace("List is empty, nothing to pop")
+		return nil
+	}
+
+	if err != nil || lrange.Err() != nil {
+		log.WithFields(logrus.Fields{
+			"prefix": redisLogPrefix,
+		}).Error("LPopCount command failed: ", err)
 		r.Connect()
 	}
 
