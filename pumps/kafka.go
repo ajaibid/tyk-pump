@@ -1,10 +1,18 @@
 package pumps
 
 import (
+	"bufio"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"io"
+	"mime"
+	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -69,6 +77,7 @@ type KafkaConf struct {
 	// SASL algorithm. It's the algorithm specified for scram mechanism. It could be sha-512 or sha-256.
 	// Defaults to "sha-256".
 	Algorithm string `json:"sasl_algorithm" mapstructure:"sasl_algorithm"`
+	Key       string `json:"sasl_key" mapstructure:"sasl_key"`
 }
 
 func (k *KafkaPump) New() Pump {
@@ -193,7 +202,6 @@ func (k *KafkaPump) WriteData(ctx context.Context, data []interface{}) error {
 	k.log.Debug("Attempting to write ", len(data), " records...")
 	kafkaMessages := make([]kafka.Message, len(data))
 	for i, v := range data {
-		//Build message format
 		decoded := v.(analytics.AnalyticsRecord)
 		message := Json{
 			"timestamp":       decoded.TimeStamp,
@@ -211,26 +219,38 @@ func (k *KafkaPump) WriteData(ctx context.Context, data []interface{}) error {
 			"content_length":  decoded.ContentLength,
 			"user_agent":      decoded.UserAgent,
 		}
-		// Filter only expose raw request response for certain status
+
 		if val, ok := k.kafkaConf.MetaData["detailed_log_for_status"]; ok {
 			if strings.Contains(val, strconv.Itoa(decoded.ResponseCode)) {
-				filteredRequestB, _ := base64.StdEncoding.DecodeString(decoded.RawRequest)
-				filteredRequest := string(filteredRequestB)
-				if hideHeader, ok2 := k.kafkaConf.MetaData["hide_request_header"]; ok2 {
-					hideHeaderArr := strings.Split(hideHeader, ",")
+				filteredRequestB, err := base64.StdEncoding.DecodeString(decoded.RawRequest)
+				if err != nil { // CHANGED: don't swallow — blank request otherwise
+					k.log.WithError(err).Warn("failed to base64-decode RawRequest; skipping detail")
+				} else {
+					filteredRequest := string(filteredRequestB)
 
-					hideBody, _ := k.kafkaConf.MetaData["hide_request_body_key"]
-					hideBodyArr := strings.Split(hideBody, ",")
+					if hideHeader, ok2 := k.kafkaConf.MetaData["hide_request_header"]; ok2 {
+						hideHeaderArr := strings.Split(hideHeader, ",")
+						hideBodyArr := strings.Split(k.kafkaConf.MetaData["hide_request_body_key"], ",")
+						hashBodyArr := strings.Split(k.kafkaConf.MetaData["hash_request_body_key"], ",") // CHANGED: new field
 
-					rawDecodedData, _ := decodeRawData(filteredRequest, hideHeaderArr, hideBodyArr, false)
-					filteredRequestByte, _ := json.Marshal(rawDecodedData)
-					filteredRequest = string(filteredRequestByte)
+						// CHANGED: pass hash list + pepper; fail closed on error
+						rawDecodedData, derr := decodeRawLogData(filteredRequest, hideHeaderArr, hideBodyArr, hashBodyArr, []byte(k.kafkaConf.MetaData["hash_key"]))
+						if derr != nil {
+							k.log.WithError(derr).Warn("decodeRawLogData failed; dropping raw_request")
+							filteredRequest = "" // never publish unredacted on parse failure
+						} else {
+							filteredRequestByte, _ := json.Marshal(rawDecodedData)
+							filteredRequest = string(filteredRequestByte)
+						}
+					}
+
+					rawResponseDecodedB, rerr := base64.StdEncoding.DecodeString(decoded.RawResponse)
+					if rerr != nil { // CHANGED
+						k.log.WithError(rerr).Warn("failed to base64-decode RawResponse")
+					}
+					message["raw_request"] = filteredRequest
+					message["raw_response"] = string(rawResponseDecodedB)
 				}
-
-				rawResponseDecodedB, _ := base64.StdEncoding.DecodeString(decoded.RawResponse)
-				rawResponseDecoded := string(rawResponseDecodedB)
-				message["raw_request"] = filteredRequest
-				message["raw_response"] = rawResponseDecoded
 			}
 		}
 
@@ -245,30 +265,180 @@ func (k *KafkaPump) WriteData(ctx context.Context, data []interface{}) error {
 			}
 		}
 
-		//Add static metadata to json
 		for key, value := range k.kafkaConf.MetaData {
 			message[key] = value
 		}
 
-		//Transform object to json string
-		json, jsonError := json.Marshal(message)
+		messageBytes, jsonError := json.Marshal(message) // CHANGED: was `json, ...` which shadowed the json package
 		if jsonError != nil {
 			k.log.WithError(jsonError).Error("unable to marshal message")
 		}
 
-		//Kafka message structure
 		kafkaMessages[i] = kafka.Message{
 			Time:  time.Now(),
-			Value: json,
+			Value: messageBytes,
 		}
 	}
-	//Send kafka message
-	kafkaError := k.write(ctx, kafkaMessages)
-	if kafkaError != nil {
+
+	if kafkaError := k.write(ctx, kafkaMessages); kafkaError != nil {
 		k.log.WithError(kafkaError).Error("unable to write message")
 	}
 	k.log.Info("ElapsedTime in ms for ", len(data), " records:", time.Since(startTime).Milliseconds())
 	return nil
+}
+
+type DecodedRequest struct {
+	Method  string            `json:"method"`
+	URL     string            `json:"url"`
+	Proto   string            `json:"proto"`
+	Headers map[string]string `json:"headers"`
+	Body    string            `json:"body"`
+}
+
+func buildKeySet(arr []string, lower bool) map[string]struct{} {
+	set := make(map[string]struct{}, len(arr))
+	for _, k := range arr {
+		k = strings.TrimSpace(k)
+		if k == "" {
+			continue
+		}
+		if lower {
+			k = strings.ToLower(k)
+		}
+		set[k] = struct{}{}
+	}
+	return set
+}
+
+// HMAC-SHA256 with secret pepper: deterministic (correlation works) but not
+// brute-forceable without the key. Bare SHA256 of a password is reversible.
+func hashSecret(value string, key []byte) string {
+	if len(value) == 0 {
+		return value
+	}
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(value))
+	return "h:" + hex.EncodeToString(mac.Sum(nil))
+}
+
+func decodeRawLogData(raw string, hideHeaders, hideBody, hashBody []string, key []byte) (*DecodedRequest, error) {
+	req, err := http.ReadRequest(bufio.NewReader(strings.NewReader(raw)))
+	if err != nil {
+		return nil, err
+	}
+	defer req.Body.Close()
+
+	bodyBytes, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	hideHdr := buildKeySet(hideHeaders, true) // headers: case-insensitive
+	hide := buildKeySet(hideBody, false)      // body keys: case-sensitive per spec
+	hash := buildKeySet(hashBody, false)
+
+	headers := make(map[string]string, len(req.Header))
+	for name, vals := range req.Header {
+		if _, ok := hideHdr[strings.ToLower(name)]; ok {
+			headers[name] = "***"
+			continue
+		}
+		headers[name] = strings.Join(vals, ", ")
+	}
+
+	body := processBody(bodyBytes, req.Header.Get("Content-Type"), hide, hash, key)
+
+	return &DecodedRequest{
+		Method:  req.Method,
+		URL:     req.URL.String(),
+		Proto:   req.Proto,
+		Headers: headers,
+		Body:    string(body),
+	}, nil
+}
+
+func processBody(body []byte, contentType string, hide, hash map[string]struct{}, key []byte) []byte {
+	if len(body) == 0 || (len(hide) == 0 && len(hash) == 0) {
+		return body
+	}
+	mediaType, _, _ := mime.ParseMediaType(contentType) // strips "; charset=UTF-8"
+	switch mediaType {
+	case "application/x-www-form-urlencoded":
+		return processForm(body, hide, hash, key)
+	case "application/json":
+		return processJSON(body, hide, hash, key)
+	default:
+		return body
+	}
+}
+
+func processForm(body []byte, hide, hash map[string]struct{}, key []byte) []byte {
+	pairs := strings.Split(string(body), "&")
+	for i, pair := range pairs {
+		eq := strings.IndexByte(pair, '=')
+		if eq < 0 {
+			continue
+		}
+		name, err := url.QueryUnescape(pair[:eq])
+		if err != nil {
+			continue
+		}
+		if _, ok := hide[name]; ok {
+			pairs[i] = pair[:eq+1] + "%2A%2A%2A" // ***
+			continue
+		}
+		if _, ok := hash[name]; ok {
+			val, err := url.QueryUnescape(pair[eq+1:])
+			if err != nil {
+				continue
+			}
+			pairs[i] = pair[:eq+1] + url.QueryEscape(hashSecret(val, key))
+		}
+	}
+	return []byte(strings.Join(pairs, "&"))
+}
+
+func processJSON(body []byte, hide, hash map[string]struct{}, key []byte) []byte {
+	var parsed interface{}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return body // unparseable JSON: see note below
+	}
+	parsed = redactJSONValue(parsed, hide, hash, key)
+	out, err := json.Marshal(parsed)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// recursive so nested secrets (e.g. {"auth":{"password":"x"}}) are caught
+func redactJSONValue(v interface{}, hide, hash map[string]struct{}, key []byte) interface{} {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		for k, val := range t {
+			if _, ok := hide[k]; ok {
+				t[k] = "***"
+				continue
+			}
+			if _, ok := hash[k]; ok {
+				if s, isStr := val.(string); isStr {
+					t[k] = hashSecret(s, key)
+				} else {
+					t[k] = "***" // non-string secret: mask, don't hash
+				}
+				continue
+			}
+			t[k] = redactJSONValue(val, hide, hash, key)
+		}
+		return t
+	case []interface{}:
+		for i, item := range t {
+			t[i] = redactJSONValue(item, hide, hash, key)
+		}
+		return t
+	default:
+		return v
+	}
 }
 
 func (k *KafkaPump) write(ctx context.Context, messages []kafka.Message) error {
