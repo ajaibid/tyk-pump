@@ -1,0 +1,26 @@
+name: Build and Push
+# Builds the tyk-pump image and pushes it to Artifact Registry as
+#   asia-southeast2-docker.pkg.dev/ajaib-nprd-dmz-0/tyk/tyk-pump:<branch>-<sha>
+# Replaces the Jenkins jobTykPump build. Deploy is manual (GitOps tag-bump in
+# infra-k8s-app-manifest, see spec §5). Prod is a later slice.
+
+on:
+  push:
+    branches: [stg]
+  workflow_dispatch:
+
+jobs:
+  build:
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write # reusable workflow declares it; caller must grant it or the run startup-fails
+    uses: ajaibid/infra-platform-actions/.github/workflows/golang-docker-build-and-push---global-v1.yaml@main
+    with:
+      dockerfile: Dockerfile
+      cache: true
+      gcp_project_id: ajaib-nprd-dmz-0
+      gcp_wi_provider: "<<FILL: WIF_PROVIDER>>"
+      gcp_service_account: "<<FILL: DEPLOY_SA>>"
+      image_prefix: tyk
+      runner_label: gha-runner-dind-nprd-shared-1
