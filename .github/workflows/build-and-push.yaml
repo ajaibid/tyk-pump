@@ -20,7 +20,7 @@ jobs:
       dockerfile: Dockerfile
       cache: true
       gcp_project_id: ajaib-nprd-dmz-0
-      gcp_wi_provider: "<<FILL: WIF_PROVIDER>>"
-      gcp_service_account: "<<FILL: DEPLOY_SA>>"
+      gcp_wi_provider: "projects/792796195706/locations/global/workloadIdentityPools/github-action-pool-01/providers/artifactregistry-writer"
+      gcp_service_account: "github-action@ajaib-nprd-dmz-0.iam.gserviceaccount.com"
       image_prefix: tyk
       runner_label: gha-runner-dind-nprd-shared-1
