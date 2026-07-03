@@ -15,7 +15,7 @@ on:
 
 jobs:
   build:
-    runs-on: [stg-dmz-default]
+    runs-on: stg-dmz-default
     permissions:
       contents: read
       id-token: write
