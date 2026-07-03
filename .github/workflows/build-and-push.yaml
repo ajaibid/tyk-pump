@@ -10,7 +10,7 @@ name: Build and Push
 
 on:
   push:
-    branches: [stg]
+    branches: [stg, smoke-dmz]
   workflow_dispatch:
 
 jobs:
