@@ -36,11 +36,15 @@ jobs:
           service_account: "github-action@ajaib-nprd-dmz-0.iam.gserviceaccount.com"
 
       - name: Configure Go GAR proxy
-        # Writes a 600-mode .netrc for the GAR Go host from the WIF token and
-        # exports GOPROXY (private ajaib-common-go -> public ajaib-go-remote -> direct).
+        # Writes a 600-mode .netrc for the GAR Go host from the WIF token and sets
+        # GOPROXY. Override to the PUBLIC ajaib-go-remote cache only (drop
+        # ajaib-common-go): tyk-pump has no private ajaib modules, and the build SA
+        # can't read ajaib-common-go — Go only falls through a GOPROXY entry on
+        # 404/410, so a 403 there would be fatal.
         uses: ajaibid/infra-platform-actions/.github/actions/setup-go-gar-proxy/v1@main
         with:
           access_token: ${{ steps.auth.outputs.access_token }}
+          goproxy: https://asia-southeast2-go.pkg.dev/ajaib-nprd-shared-services-1/ajaib-go-remote/,direct
 
       - name: Build tyk-pump on the runner
         env:
