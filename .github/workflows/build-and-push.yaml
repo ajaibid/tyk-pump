@@ -1,0 +1,75 @@
+name: Build and Push
+# Compiles tyk-pump ON THE RUNNER (Go modules resolved through the GAR Go proxy
+# via a Workload-Identity .netrc), then builds a runtime-only image that just
+# COPYs the static binary in, and pushes it to Artifact Registry as
+#   asia-southeast2-docker.pkg.dev/ajaib-nprd-dmz-0/tyk/tyk-pump:<branch>-<sha>
+# Runs on the isolated DMZ ARC pool (scale-set stg-dmz-default, runner group
+# stg-dmz on nprd-dmz-cluster-0). Replaces the in-Docker `go build` whose
+# GOPROXY=athens is unreachable from the DMZ perimeter. Tyk SP2 / WS-C.
+# Deploy is manual (GitOps tag-bump in infra-k8s-app-manifest). Prod is a later slice.
+
+on:
+  push:
+    branches: [stg]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: [stg-dmz-default]
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Authenticate to GCP
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          token_format: access_token
+          project_id: ajaib-nprd-dmz-0
+          workload_identity_provider: "projects/792796195706/locations/global/workloadIdentityPools/github-action-pool-01/providers/artifactregistry-writer"
+          service_account: "github-action@ajaib-nprd-dmz-0.iam.gserviceaccount.com"
+
+      - name: Configure Go GAR proxy
+        # Writes a 600-mode .netrc for the GAR Go host from the WIF token and sets
+        # GOPROXY. Override to the PUBLIC ajaib-go-remote cache only (drop
+        # ajaib-common-go): tyk-pump has no private ajaib modules, and the build SA
+        # can't read ajaib-common-go — Go only falls through a GOPROXY entry on
+        # 404/410, so a 403 there would be fatal.
+        uses: ajaibid/infra-platform-actions/.github/actions/setup-go-gar-proxy/v1@main
+        with:
+          access_token: ${{ steps.auth.outputs.access_token }}
+          goproxy: https://asia-southeast2-go.pkg.dev/ajaib-nprd-shared-services-1/ajaib-go-remote/,direct
+
+      - name: Build tyk-pump on the runner
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          go build -trimpath -buildvcs=false -o dist/tyk-pump .
+          ls -lh dist/
+
+      - name: Get tag or SHA
+        id: ver
+        uses: ajaibid/infra-platform-actions/.github/actions/get-tag-sha/v1@main
+
+      - name: Build & push runtime image to GAR
+        # Runtime-only Dockerfile just COPYs dist/tyk-pump, so this build fetches
+        # nothing and needs no in-build module auth.
+        uses: ajaibid/infra-platform-actions/.github/actions/gcp-build-and-push/v1@main
+        with:
+          project_id: ajaib-nprd-dmz-0
+          workload_identity_provider: "projects/792796195706/locations/global/workloadIdentityPools/github-action-pool-01/providers/artifactregistry-writer"
+          service_account: "github-action@ajaib-nprd-dmz-0.iam.gserviceaccount.com"
+          registry: asia-southeast2-docker.pkg.dev
+          image_path: ajaib-nprd-dmz-0/tyk/tyk-pump
+          dockerfile: Dockerfile
+          tag: ${{ steps.ver.outputs.version }}
