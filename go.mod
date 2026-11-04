@@ -1,6 +1,6 @@
 module github.com/TykTechnologies/tyk-pump
 
-go 1.19
+go 1.24
 
 require (
 	github.com/DataDog/datadog-go v4.7.0+incompatible
@@ -102,7 +102,7 @@ require (
 	github.com/jinzhu/now v1.1.2 // indirect
 	github.com/joho/godotenv v1.4.0 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
-	github.com/klauspost/compress v1.15.9 // indirect
+	github.com/klauspost/compress v1.18.7 // indirect
 	github.com/lintianzhi/graylogd v0.0.0-20180503131252-dc68342f04dc // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/mattn/go-sqlite3 v1.14.3 // indirect
@@ -133,8 +133,6 @@ require (
 	github.com/xdg-go/pbkdf2 v1.0.0 // indirect
 	github.com/xdg-go/scram v1.1.2 // indirect
 	github.com/xdg-go/stringprep v1.0.4 // indirect
-	github.com/xdg/scram v1.0.3 // indirect
-	github.com/xdg/stringprep v1.0.3 // indirect
 	github.com/xtgo/uuid v0.0.0-20140804021211-a0b114877d4c // indirect
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
 	go.mongodb.org/mongo-driver v1.17.1 // indirect
